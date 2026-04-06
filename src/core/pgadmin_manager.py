@@ -1,4 +1,3 @@
-
 import os
 import subprocess
 import platform
@@ -87,103 +86,145 @@ DEFAULT_PASSWORD = "pgopsadmin"
 
 def _reset_credentials(python: Path, log_fn) -> bool:
     """
-    After pgAdmin has started and created its SQLite DB, use pgAdmin's own
-    Python + Flask-Security to set the password to our known value.
-    This runs as a separate short-lived process and exits immediately.
+    Reset pgAdmin credentials using a self-contained script.
+    Tries Flask-Security first, then falls back to bcrypt directly.
+    The script is written to a temp file and run as a subprocess so that
+    pgAdmin's own Python environment is used — not the PGOps Python.
     """
     db_path  = get_data_dir() / "pgadmin4.db"
     web_dir  = get_pgadmin_dir() / "web"
 
+    if not db_path.exists():
+        log_fn("[pgAdmin] DB not found yet — skipping credential reset.")
+        return False
+
+    # Build the reset script. Use raw string paths to avoid backslash issues.
+    web_dir_str = str(web_dir).replace("\\", "\\\\")
+    db_path_str = str(db_path).replace("\\", "\\\\")
+
     script = f"""
-import sys, os
-sys.path.insert(0, r"{web_dir}")
-os.chdir(r"{web_dir}")
+import sys, os, sqlite3
 
-import sqlite3
+web_dir  = r"{web_dir}"
+db_path  = r"{db_path}"
+new_email    = "{DEFAULT_EMAIL}"
+new_password = "{DEFAULT_PASSWORD}"
 
-db_path = r"{db_path}"
-conn = sqlite3.connect(db_path)
-cur  = conn.cursor()
-
-# Find out what tables exist
-cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
-tables = [r[0] for r in cur.fetchall()]
-
-if "user" not in tables:
-    print("NO_USER_TABLE")
-    conn.close()
-    sys.exit(1)
-
-# Get the first admin user
-cur.execute("SELECT id, email FROM user ORDER BY id LIMIT 1")
-row = cur.fetchone()
-if not row:
-    print("NO_USERS")
-    conn.close()
-    sys.exit(1)
-
-user_id    = row[0]
-user_email = row[1]
-new_pw     = "{DEFAULT_PASSWORD}"
-new_email  = "{DEFAULT_EMAIL}"
-
-# Hash the password using Flask-Security (same as pgAdmin uses)
+# ── Method 1: Flask-Security via pgAdmin's full stack ────────────────────────
 try:
-    from flask_security.utils import hash_password
+    sys.path.insert(0, web_dir)
+    os.chdir(web_dir)
+
     import config
     from pgadmin import create_app
     app = create_app()
     with app.app_context():
+        from flask_security.utils import hash_password
         from pgadmin.model import db, User
-        user = db.session.get(User, user_id)
-        user.email    = new_email
-        user.password = hash_password(new_pw)
-        user.active   = True
-        db.session.commit()
-    print("OK_FLASK:" + new_email)
+        user = User.query.order_by(User.id).first()
+        if user:
+            user.email    = new_email
+            user.password = hash_password(new_password)
+            user.active   = True
+            db.session.commit()
+            print("OK_FLASK:" + new_email)
+            sys.exit(0)
+        else:
+            print("NO_USER")
+            sys.exit(1)
 except Exception as e1:
-    # Fallback: bcrypt directly into the SQLite column
-    try:
-        import bcrypt
-        hashed = bcrypt.hashpw(new_pw.encode(), bcrypt.gensalt(12)).decode()
-        cur.execute(
-            "UPDATE user SET email=?, password=?, active=1 WHERE id=?",
-            (new_email, hashed, user_id)
-        )
-        conn.commit()
-        print("OK_BCRYPT:" + new_email)
-    except Exception as e2:
-        print("FAIL:" + str(e1) + " | " + str(e2))
+    print("FLASK_FAIL:" + str(e1)[:200])
+
+# ── Method 2: bcrypt directly into SQLite ────────────────────────────────────
+try:
+    import bcrypt
+    hashed = bcrypt.hashpw(new_password.encode(), bcrypt.gensalt(12)).decode()
+
+    conn = sqlite3.connect(db_path)
+    cur  = conn.cursor()
+
+    cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='user'")
+    if not cur.fetchone():
+        print("NO_USER_TABLE")
+        conn.close()
         sys.exit(1)
 
-conn.close()
+    cur.execute("SELECT id, email FROM user ORDER BY id LIMIT 1")
+    row = cur.fetchone()
+    if not row:
+        print("NO_USERS")
+        conn.close()
+        sys.exit(1)
+
+    cur.execute(
+        "UPDATE user SET email=?, password=?, active=1 WHERE id=?",
+        (new_email, hashed, row[0])
+    )
+    conn.commit()
+    conn.close()
+    print("OK_BCRYPT:" + new_email)
+    sys.exit(0)
+except Exception as e2:
+    print("BCRYPT_FAIL:" + str(e2)[:200])
+    sys.exit(1)
 """
 
-    script_file = get_data_dir() / "_reset_creds.py"
-    script_file.write_text(script)
+    script_file = get_data_dir() / "_pgadmin_reset.py"
+    try:
+        script_file.write_text(script, encoding="utf-8")
+    except Exception as e:
+        log_fn(f"[pgAdmin] Could not write reset script: {e}")
+        return False
 
     try:
         r = subprocess.run(
             [str(python), str(script_file)],
-            capture_output=True, text=True,
-            timeout=30,
+            capture_output=True,
+            text=True,
+            timeout=45,
+            cwd=str(web_dir),       # run from pgAdmin's web dir
             **_popen_kwargs(),
         )
         out = (r.stdout + r.stderr).strip()
-        log_fn(f"[pgAdmin] Credential reset: {out[:300]}")
-
-        script_file.unlink(missing_ok=True)
+        log_fn(f"[pgAdmin] Reset output: {out[:400]}")
 
         if "OK_" in r.stdout:
+            log_fn(f"[pgAdmin] Credentials set → {DEFAULT_EMAIL} / {DEFAULT_PASSWORD}")
             return True
-        log_fn(f"[pgAdmin] Credential reset returned rc={r.returncode}")
+
+        log_fn(f"[pgAdmin] Reset failed (rc={r.returncode}). Manual login may be required.")
+        return False
+
+    except subprocess.TimeoutExpired:
+        log_fn("[pgAdmin] Credential reset timed out.")
         return False
     except Exception as e:
         log_fn(f"[pgAdmin] Credential reset exception: {e}")
+        return False
+    finally:
         try:
             script_file.unlink(missing_ok=True)
         except Exception:
             pass
+
+
+def _nuke_pgadmin_db(log_fn) -> bool:
+    """
+    Delete the pgAdmin SQLite database so it gets recreated fresh on next start.
+    This forces pgAdmin to re-run its setup with the env vars we pass.
+    """
+    db_path = get_data_dir() / "pgadmin4.db"
+    sessions_dir = get_data_dir() / "sessions"
+    try:
+        if db_path.exists():
+            db_path.unlink()
+            log_fn("[pgAdmin] Removed stale pgadmin4.db — will be recreated fresh.")
+        if sessions_dir.exists():
+            import shutil
+            shutil.rmtree(sessions_dir, ignore_errors=True)
+        return True
+    except Exception as e:
+        log_fn(f"[pgAdmin] Could not remove DB: {e}")
         return False
 
 
@@ -194,7 +235,7 @@ class PgAdminManager:
         self._log = log_fn or print
         self._proc = None
         self.port  = PGADMIN_PORT
-        self._creds_reset = False   # only reset once per data dir lifetime
+        self._creds_reset = False
 
     def log(self, msg: str):
         self._log(msg)
@@ -259,7 +300,7 @@ FILE_LOG_LEVEL    = 40
 
     # ── Start / Stop ──────────────────────────────────────────────────────────
 
-    def start(self) -> tuple[bool, str]:
+    def start(self, fresh: bool = False) -> tuple[bool, str]:
         if self.is_running():
             return True, f"pgAdmin already running at {self.url()}"
 
@@ -281,6 +322,11 @@ FILE_LOG_LEVEL    = 40
 
         if not web_py.exists():
             return False, f"pgAdmin4.py not found at {web_py}"
+
+        # If asked for a fresh start, nuke the DB so env-var credentials apply
+        if fresh:
+            _nuke_pgadmin_db(self.log)
+            self._creds_reset = False
 
         self._write_config()
 
@@ -328,20 +374,19 @@ FILE_LOG_LEVEL    = 40
             if self.is_running():
                 self.log(f"[pgAdmin] Ready at {self.url()}")
 
-                # Reset credentials now that the DB definitely exists
+                # Give the DB another second to finish initialising before we touch it
+                time.sleep(1.5)
+
                 if not self._creds_reset:
                     self.log("[pgAdmin] Setting credentials…")
                     ok = _reset_credentials(python, self.log)
                     if ok:
                         self._creds_reset = True
-                        self.log(
-                            f"[pgAdmin] Login: {DEFAULT_EMAIL} / {DEFAULT_PASSWORD}"
-                        )
                     else:
+                        # Last resort: nuke DB and ask user to restart
                         self.log(
-                            "[pgAdmin] Could not set credentials automatically. "
-                            f"Try logging in with whatever email pgAdmin chose, "
-                            f"then change password to: {DEFAULT_PASSWORD}"
+                            "[pgAdmin] Credential reset failed. "
+                            "Use 'Reset & Restart pgAdmin' to force fresh credentials."
                         )
 
                 return True, self.url()
@@ -360,6 +405,16 @@ FILE_LOG_LEVEL    = 40
             pass
 
         return False, "pgAdmin did not start in 90s. Check Log tab."
+
+    def reset_and_restart(self) -> tuple[bool, str]:
+        """
+        Stop pgAdmin, nuke its database, and restart fresh.
+        After this the env-var credentials (DEFAULT_EMAIL / DEFAULT_PASSWORD) apply
+        without needing the credential-reset script to succeed.
+        """
+        self.stop()
+        time.sleep(1)
+        return self.start(fresh=True)
 
     def stop(self) -> tuple[bool, str]:
         if not self.is_running():
