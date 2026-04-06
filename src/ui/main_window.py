@@ -597,7 +597,7 @@ class MainWindow(QMainWindow):
         self.pgadmin_url_row = CopyRow("URL", f"http://pgops.local:5050")
         pv.addWidget(self.pgadmin_url_row)
 
-        creds_lbl = QLabel("Default login:  admin@pgops.local  /  pgopsadmin")
+        creds_lbl = QLabel("Default login:  admin@pgops.com  /  pgopsadmin")
         creds_lbl.setStyleSheet("color:#64748b;font-size:11px;font-family:monospace;")
         pv.addWidget(creds_lbl)
 
@@ -1440,7 +1440,7 @@ class MainWindow(QMainWindow):
             "All pgAdmin settings (saved connections, preferences) will be lost.\n"
             "Your PostgreSQL databases and data are NOT affected.\n\n"
             "After reset, log in with:\n"
-            "  Email:    admin@pgops.local\n"
+            "  Email:    admin@pgops.com\n"
             "  Password: pgopsadmin\n\n"
             "Continue?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,

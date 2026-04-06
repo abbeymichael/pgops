@@ -80,7 +80,7 @@ def get_data_dir() -> Path:
 
 
 PGADMIN_PORT     = 5050
-DEFAULT_EMAIL    = "admin@pgops.local"
+DEFAULT_EMAIL    = "admin@pgops.com"
 DEFAULT_PASSWORD = "pgopsadmin"
 
 

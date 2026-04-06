@@ -9,7 +9,7 @@ PA_DIR   = PG_DIR / "pgAdmin 4"
 WEB_DIR  = PA_DIR / "web"
 DB_PATH  = appdata / "PGOps" / "pgadmin4-data" / "pgadmin4.db"
 
-NEW_EMAIL    = "admin@pgops.local"
+NEW_EMAIL    = "admin@pgops.com"
 NEW_PASSWORD = "pgopsadmin"
 
 # ── Add all site-packages folders we can find under pgAdmin 4 ────────────────
