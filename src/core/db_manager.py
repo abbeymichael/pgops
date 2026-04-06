@@ -1,0 +1,309 @@
+"""
+db_manager.py
+Handles multiple PostgreSQL databases and roles on a single server instance.
+Each database entry has: name, owner username, password.
+"""
+
+import os
+import subprocess
+import platform
+from datetime import datetime
+from pathlib import Path
+
+import platform as _platform
+
+def _popen_kwargs() -> dict:
+    """
+    On Windows, prevent subprocess calls from flashing a cmd window.
+    On other platforms this is a no-op.
+    """
+    if _platform.system() == "Windows":
+        import subprocess as _sp
+        return {"creationflags": _sp.CREATE_NO_WINDOW}
+    return {}
+
+
+from typing import Optional
+
+from core.pg_manager import _bin, BASE_DIR
+
+
+BACKUP_DIR = BASE_DIR / "backups"
+
+
+def _env(password: str) -> dict:
+    e = os.environ.copy()
+    e["PGPASSWORD"] = password
+    return e
+
+
+def _psql_run(sql: str, admin_user: str, admin_password: str, port: int,
+              dbname: str = "postgres") -> tuple[bool, str]:
+    """Run a SQL command as the admin user."""
+    r = subprocess.run([
+        str(_bin("psql")),
+        "-U", admin_user,
+        "-p", str(port),
+        "-h", "127.0.0.1",
+        "-d", dbname,
+        "-c", sql,
+        "-q",
+    ], capture_output=True, **_popen_kwargs(), text=True, env=_env(admin_password))
+    return r.returncode == 0, (r.stdout + r.stderr).strip()
+
+
+def list_databases(admin_user: str, admin_password: str, port: int) -> list[dict]:
+    """Return list of user-created databases with owner info."""
+    r = subprocess.run([
+        str(_bin("psql")),
+        "-U", admin_user,
+        "-p", str(port),
+        "-h", "127.0.0.1",
+        "-d", "postgres",
+        "-c", (
+            "SELECT d.datname, r.rolname AS owner "
+            "FROM pg_database d "
+            "JOIN pg_roles r ON d.datdba = r.oid "
+            "WHERE d.datistemplate = false "
+            "AND d.datname NOT IN ('postgres') "
+            "ORDER BY d.datname;"
+        ),
+        "-t", "-A", "--field-separator=|",
+    ], capture_output=True, **_popen_kwargs(), text=True, env=_env(admin_password))
+
+    results = []
+    for line in r.stdout.strip().splitlines():
+        parts = line.strip().split("|")
+        if len(parts) == 2:
+            results.append({"name": parts[0], "owner": parts[1]})
+    return results
+
+
+def list_roles(admin_user: str, admin_password: str, port: int) -> list[str]:
+    """Return list of non-system roles."""
+    r = subprocess.run([
+        str(_bin("psql")),
+        "-U", admin_user,
+        "-p", str(port),
+        "-h", "127.0.0.1",
+        "-d", "postgres",
+        "-c", (
+            "SELECT rolname FROM pg_roles "
+            "WHERE rolname NOT LIKE 'pg_%' "
+            "ORDER BY rolname;"
+        ),
+        "-t", "-A",
+    ], capture_output=True, **_popen_kwargs(), text=True, env=_env(admin_password))
+    return [l.strip() for l in r.stdout.strip().splitlines() if l.strip()]
+
+
+def role_exists(role: str, admin_user: str, admin_password: str, port: int) -> bool:
+    return role in list_roles(admin_user, admin_password, port)
+
+
+def create_database(
+    dbname: str,
+    owner: str,
+    owner_password: str,
+    admin_user: str,
+    admin_password: str,
+    port: int,
+) -> tuple[bool, str]:
+    """Create a role (if needed) and a database owned by it."""
+    # Create role if it doesn't exist
+    if not role_exists(owner, admin_user, admin_password, port):
+        ok, msg = _psql_run(
+            f"CREATE ROLE \"{owner}\" WITH LOGIN PASSWORD '{owner_password}';",
+            admin_user, admin_password, port
+        )
+        if not ok:
+            return False, f"Failed to create role '{owner}': {msg}"
+
+    # Create database
+    r = subprocess.run([
+        str(_bin("createdb")),
+        "-U", admin_user,
+        "-p", str(port),
+        "-h", "127.0.0.1",
+        "-O", owner,
+        dbname,
+    ], capture_output=True, **_popen_kwargs(), text=True, env=_env(admin_password))
+
+    if r.returncode != 0:
+        return False, f"Failed to create database: {r.stderr.strip()}"
+
+    # Grant full privileges on the database
+    _psql_run(
+        f"GRANT ALL PRIVILEGES ON DATABASE \"{dbname}\" TO \"{owner}\";",
+        admin_user, admin_password, port
+    )
+
+    # Grant schema privileges — allows access to existing and future objects
+    # These run connected to the new database itself
+    grants = [
+        f"GRANT ALL PRIVILEGES ON SCHEMA public TO \"{owner}\";",
+        f"GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO \"{owner}\";",
+        f"GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO \"{owner}\";",
+        f"GRANT ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public TO \"{owner}\";",
+        # Default privileges: any future tables/sequences created by admin
+        # will also be accessible to the owner
+        f"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO \"{owner}\";",
+        f"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO \"{owner}\";",
+        f"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON FUNCTIONS TO \"{owner}\";",
+        # Make owner the schema owner too
+        f"ALTER SCHEMA public OWNER TO \"{owner}\";",
+    ]
+    for sql in grants:
+        _psql_run(sql, admin_user, admin_password, port, dbname=dbname)
+
+    return True, f"Database '{dbname}' created with owner '{owner}'."
+
+
+def drop_database(
+    dbname: str,
+    admin_user: str,
+    admin_password: str,
+    port: int,
+) -> tuple[bool, str]:
+    """Drop a database (terminates active connections first)."""
+    # Terminate active connections
+    _psql_run(
+        f"SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+        f"WHERE datname = '{dbname}' AND pid <> pg_backend_pid();",
+        admin_user, admin_password, port
+    )
+
+    r = subprocess.run([
+        str(_bin("dropdb")),
+        "-U", admin_user,
+        "-p", str(port),
+        "-h", "127.0.0.1",
+        dbname,
+    ], capture_output=True, **_popen_kwargs(), text=True, env=_env(admin_password))
+
+    if r.returncode != 0:
+        return False, f"Failed to drop database: {r.stderr.strip()}"
+    return True, f"Database '{dbname}' dropped."
+
+
+def change_role_password(
+    role: str,
+    new_password: str,
+    admin_user: str,
+    admin_password: str,
+    port: int,
+) -> tuple[bool, str]:
+    ok, msg = _psql_run(
+        f"ALTER ROLE \"{role}\" WITH PASSWORD '{new_password}';",
+        admin_user, admin_password, port
+    )
+    return ok, msg if not ok else f"Password changed for role '{role}'."
+
+
+# ── Backup ────────────────────────────────────────────────────────────────────
+
+def backup_database(
+    dbname: str,
+    admin_user: str,
+    admin_password: str,
+    port: int,
+    dest_dir: Optional[Path] = None,
+    progress_callback=None,
+) -> tuple[bool, str, Optional[Path]]:
+    """Dump a database to a .dump file using pg_dump (custom format)."""
+    out_dir = Path(dest_dir) if dest_dir else BACKUP_DIR
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_file = out_dir / f"{dbname}_{ts}.dump"
+
+    if progress_callback:
+        progress_callback(10)
+
+    r = subprocess.run([
+        str(_bin("pg_dump")),
+        "-U", admin_user,
+        "-p", str(port),
+        "-h", "127.0.0.1",
+        "-Fc",           # custom format (compressed, supports selective restore)
+        "-d", dbname,
+        "-f", str(out_file),
+    ], capture_output=True, **_popen_kwargs(), text=True, env=_env(admin_password))
+
+    if progress_callback:
+        progress_callback(90)
+
+    if r.returncode != 0:
+        return False, f"Backup failed: {r.stderr.strip()}", None
+
+    size_mb = out_file.stat().st_size / 1024 / 1024
+    if progress_callback:
+        progress_callback(100)
+
+    return True, f"Backup saved: {out_file.name}  ({size_mb:.2f} MB)", out_file
+
+
+def restore_database(
+    backup_file: Path,
+    dbname: str,
+    admin_user: str,
+    admin_password: str,
+    port: int,
+    progress_callback=None,
+) -> tuple[bool, str]:
+    """Restore a database from a pg_dump custom-format file."""
+    if progress_callback:
+        progress_callback(10)
+
+    # Ensure target database exists (create if needed)
+    dbs = [d["name"] for d in list_databases(admin_user, admin_password, port)]
+    if dbname not in dbs:
+        r2 = subprocess.run([
+            str(_bin("createdb")),
+            "-U", admin_user, "-p", str(port), "-h", "127.0.0.1", dbname,
+        ], capture_output=True, **_popen_kwargs(), text=True, env=_env(admin_password))
+        if r2.returncode != 0:
+            return False, f"Could not create target database: {r2.stderr.strip()}"
+
+    if progress_callback:
+        progress_callback(30)
+
+    r = subprocess.run([
+        str(_bin("pg_restore")),
+        "-U", admin_user,
+        "-p", str(port),
+        "-h", "127.0.0.1",
+        "-d", dbname,
+        "--no-owner",
+        "--no-privileges",
+        "-c",            # clean (drop) existing objects before restoring
+        str(backup_file),
+    ], capture_output=True, **_popen_kwargs(), text=True, env=_env(admin_password))
+
+    if progress_callback:
+        progress_callback(100)
+
+    # pg_restore exits 1 on warnings but still succeeds — check stderr
+    if r.returncode not in (0, 1):
+        return False, f"Restore failed: {r.stderr.strip()}"
+
+    return True, f"Restore complete into '{dbname}'."
+
+
+def list_backups(backup_dir: Optional[Path] = None) -> list[dict]:
+    """Return list of available backup files sorted newest first."""
+    d = Path(backup_dir) if backup_dir else BACKUP_DIR
+    if not d.exists():
+        return []
+    files = sorted(d.glob("*.dump"), key=lambda f: f.stat().st_mtime, reverse=True)
+    result = []
+    for f in files:
+        size_mb = f.stat().st_size / 1024 / 1024
+        mtime = datetime.fromtimestamp(f.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+        result.append({
+            "name": f.name,
+            "path": f,
+            "size_mb": round(size_mb, 2),
+            "modified": mtime,
+        })
+    return result

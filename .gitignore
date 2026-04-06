@@ -1,0 +1,11 @@
+git ignore files and folders that should not be tracked by git. This includes build artifacts, temporary files, and other files that are not meant to be committed to the repository.
+
+/build/
+/dist/
+*.egg-info/
+*.pyc
+__pycache__/
+*.log
+/venv/
+/assets/
+/node_modules/
