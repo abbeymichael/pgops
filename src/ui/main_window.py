@@ -1,16 +1,17 @@
 import sys
 import platform
 from pathlib import Path
+
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QLineEdit, QTextEdit, QGroupBox, QCheckBox,
-    QSpinBox, QTabWidget, QProgressBar, QMessageBox, QFileDialog,
+    QSpinBox, QStackedWidget, QProgressBar, QMessageBox, QFileDialog,
     QSystemTrayIcon, QMenu, QFrame, QTableWidget, QTableWidgetItem,
     QHeaderView, QDialog, QDialogButtonBox, QComboBox, QAbstractItemView,
     QTimeEdit, QScrollArea,
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QTime
-from PyQt6.QtGui import QColor, QIcon, QPixmap, QAction
+from PyQt6.QtGui import QColor, QIcon, QPixmap, QAction, QFont
 
 from core.pg_manager import PostgresManager, BASE_DIR, DATA_DIR, LOG_FILE, _bin
 from core.config import load_config, save_config
@@ -29,7 +30,13 @@ from ui.login_dialog import ChangePasswordDialog as ChangePwDialog
 from ui.files_tab import FilesTab
 from core.minio_manager import MinIOManager
 from core.pgadmin_manager import PgAdminManager
-from ui.activity_monitor import ActivityMonitor
+from ui.tab_activity import ActivityTab
+from ui.sidebar import Sidebar
+from ui.header_bar import HeaderBar
+from ui.tab_server import ServerTab
+from ui.theme import APP_STYLE, C_BG, C_SURFACE, C_SURFACE2, C_BORDER, C_BORDER2
+from ui.theme import C_TEXT, C_TEXT2, C_TEXT3, C_BLUE, C_GREEN, C_RED, C_AMBER, C_PURPLE
+from ui.theme import TABLE_STYLE
 from core.ssl_manager import (
     generate_certificate, enable_ssl, disable_ssl,
     get_ssl_status, get_cert_info, is_ssl_configured,
@@ -37,7 +44,6 @@ from core.ssl_manager import (
 )
 
 
-# ─── Worker with progress signal ─────────────────────────────────────────────
 class Worker(QThread):
     done     = pyqtSignal(bool, str)
     progress = pyqtSignal(int)
@@ -61,55 +67,74 @@ class Worker(QThread):
             self.done.emit(False, str(e))
 
 
-# ─── UI helpers ───────────────────────────────────────────────────────────────
-def _btn(text, bg="#1d4ed8", hover="#1e40af", fg="white", h=38):
+def _btn(text, bg=C_BLUE, hover="#3b7de8", fg="white", h=36):
     b = QPushButton(text)
     b.setFixedHeight(h)
+    b.setCursor(Qt.CursorShape.PointingHandCursor)
     b.setStyleSheet(
         f"QPushButton{{background:{bg};color:{fg};border:none;"
-        f"border-radius:6px;padding:0 14px;font-size:13px;font-weight:600;}}"
+        f"border-radius:6px;padding:0 14px;font-size:12px;font-weight:700;}}"
         f"QPushButton:hover{{background:{hover};}}"
-        f"QPushButton:disabled{{background:#1e293b;color:#475569;}}"
+        f"QPushButton:disabled{{background:{C_BORDER};color:{C_TEXT3};}}"
     )
     return b
 
+
 def _inp(val="", pw=False, placeholder=""):
     f = QLineEdit(val)
-    if pw: f.setEchoMode(QLineEdit.EchoMode.Password)
-    if placeholder: f.setPlaceholderText(placeholder)
+    if pw:
+        f.setEchoMode(QLineEdit.EchoMode.Password)
+    if placeholder:
+        f.setPlaceholderText(placeholder)
     f.setStyleSheet(
-        "background:#1e293b;border:1px solid #334155;border-radius:5px;"
-        "padding:5px 10px;color:#e2e8f0;font-size:13px;"
+        f"QLineEdit{{background:{C_SURFACE};border:1px solid {C_BORDER};"
+        f"border-radius:6px;padding:7px 11px;color:{C_TEXT};font-size:13px;}}"
+        f"QLineEdit:focus{{border:1px solid {C_BLUE};}}"
     )
     return f
 
-def _lbl(text, color="#94a3b8", size=12):
+
+def _lbl(text, color=C_TEXT2, size=12):
     l = QLabel(text)
-    l.setStyleSheet(f"color:{color};font-size:{size}px;")
+    l.setStyleSheet(f"color:{color};font-size:{size}px;background:transparent;")
     return l
+
 
 def _group(title):
     g = QGroupBox(title)
-    QVBoxLayout(g).setSpacing(6)
+    v = QVBoxLayout(g)
+    v.setSpacing(8)
+    g.setStyleSheet(
+        f"QGroupBox{{border:1px solid {C_BORDER};border-radius:8px;"
+        f"margin-top:14px;padding:12px 12px 10px 12px;"
+        f"font-size:10px;color:{C_TEXT3};letter-spacing:1px;}}"
+        f"QGroupBox::title{{subcontrol-origin:margin;left:12px;"
+        f"padding:0 6px;color:{C_TEXT3};font-size:10px;letter-spacing:1.5px;}}"
+    )
     return g
+
 
 def _page():
     w = QWidget()
+    w.setStyleSheet("background:#1a1d23;")
     v = QVBoxLayout(w)
-    v.setContentsMargins(22, 18, 22, 18)
+    v.setContentsMargins(24, 20, 24, 20)
     v.setSpacing(14)
     return w, v
+
 
 def _sep():
     f = QFrame()
     f.setFrameShape(QFrame.Shape.HLine)
-    f.setStyleSheet("color:#1e293b;")
+    f.setFixedHeight(1)
+    f.setStyleSheet(f"background:{C_BORDER};border:none;")
     return f
 
 
 class CopyRow(QWidget):
     def __init__(self, label, value=""):
         super().__init__()
+        self.setStyleSheet("background:transparent;")
         row = QHBoxLayout(self)
         row.setContentsMargins(0, 1, 0, 1)
         row.setSpacing(8)
@@ -118,14 +143,17 @@ class CopyRow(QWidget):
         self.field = QLineEdit(value)
         self.field.setReadOnly(True)
         self.field.setStyleSheet(
-            "background:#1e293b;border:1px solid #334155;border-radius:5px;"
-            "padding:5px 10px;color:#e2e8f0;font-family:monospace;font-size:12px;"
+            f"QLineEdit{{background:{C_SURFACE};border:1px solid {C_BORDER};"
+            f"border-radius:6px;padding:5px 10px;color:{C_TEXT};"
+            f"font-family:'Consolas','Courier New',monospace;font-size:12px;}}"
         )
         btn = QPushButton("Copy")
         btn.setFixedSize(50, 26)
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
         btn.setStyleSheet(
-            "QPushButton{background:#334155;color:#94a3b8;border:none;border-radius:4px;font-size:11px;}"
-            "QPushButton:hover{background:#475569;color:#fff;}"
+            f"QPushButton{{background:{C_SURFACE2};color:{C_TEXT3};"
+            f"border:1px solid {C_BORDER2};border-radius:4px;font-size:11px;}}"
+            f"QPushButton:hover{{background:{C_BORDER2};color:{C_TEXT};}}"
         )
         btn.clicked.connect(lambda: (
             QApplication.clipboard().setText(self.field.text()),
@@ -140,31 +168,12 @@ class CopyRow(QWidget):
         self.field.setText(v)
 
 
-class StatusBadge(QLabel):
-    def __init__(self):
-        super().__init__()
-        self.setFixedHeight(26)
-        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.stopped()
-
-    def _s(self, text, fg, bg):
-        self.setText(f"  {text}  ")
-        self.setStyleSheet(
-            f"color:{fg};background:{bg};border:1px solid {fg}44;"
-            f"border-radius:13px;font-size:12px;font-weight:bold;padding:0 8px;"
-        )
-
-    def running(self):   self._s("RUNNING",   "#22c55e", "#0a1c0f")
-    def stopped(self):   self._s("STOPPED",   "#ef4444", "#1c0a0a")
-    def starting(self):  self._s("STARTING",  "#f59e0b", "#1c1208")
-
-
 class CreateDbDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Create Database")
         self.setFixedWidth(400)
-        self.setStyleSheet("background:#0f172a;color:#e2e8f0;")
+        self.setStyleSheet(f"background:{C_SURFACE};color:{C_TEXT};")
         layout = QVBoxLayout(self)
         layout.setSpacing(10)
         layout.setContentsMargins(20, 20, 20, 20)
@@ -174,17 +183,21 @@ class CreateDbDialog(QDialog):
             ("Owner Password", "password", True),
             ("Confirm Password", "confirm", True),
         ]:
-            layout.addWidget(_lbl(lbl_text, "#94a3b8"))
+            layout.addWidget(_lbl(lbl_text))
             field = _inp(pw=pw)
             setattr(self, attr, field)
             layout.addWidget(field)
-        self.error_lbl = _lbl("", "#ef4444")
+        self.error_lbl = _lbl("", C_RED)
         self.error_lbl.setVisible(False)
         layout.addWidget(self.error_lbl)
         btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         btns.accepted.connect(self._validate)
         btns.rejected.connect(self.reject)
-        btns.setStyleSheet("QPushButton{background:#1e293b;color:#e2e8f0;border:none;border-radius:5px;padding:6px 18px;}QPushButton:hover{background:#334155;}")
+        btns.setStyleSheet(
+            f"QPushButton{{background:{C_SURFACE2};color:{C_TEXT};"
+            f"border:1px solid {C_BORDER};border-radius:5px;padding:6px 18px;}}"
+            f"QPushButton:hover{{background:{C_BORDER2};}}"
+        )
         layout.addWidget(btns)
 
     def _validate(self):
@@ -212,23 +225,27 @@ class ChangePasswordDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle(f"Change Password - {role}")
         self.setFixedWidth(360)
-        self.setStyleSheet("background:#0f172a;color:#e2e8f0;")
+        self.setStyleSheet(f"background:{C_SURFACE};color:{C_TEXT};")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(10)
-        layout.addWidget(_lbl(f"New password for: {role}", "#94a3b8"))
+        layout.addWidget(_lbl(f"New password for: {role}"))
         self.pw = _inp(pw=True)
         self.cf = _inp(pw=True)
-        self.err = _lbl("", "#ef4444")
+        self.err = _lbl("", C_RED)
         self.err.setVisible(False)
         layout.addWidget(self.pw)
-        layout.addWidget(_lbl("Confirm", "#94a3b8"))
+        layout.addWidget(_lbl("Confirm"))
         layout.addWidget(self.cf)
         layout.addWidget(self.err)
         btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         btns.accepted.connect(self._validate)
         btns.rejected.connect(self.reject)
-        btns.setStyleSheet("QPushButton{background:#1e293b;color:#e2e8f0;border:none;border-radius:5px;padding:6px 18px;}QPushButton:hover{background:#334155;}")
+        btns.setStyleSheet(
+            f"QPushButton{{background:{C_SURFACE2};color:{C_TEXT};"
+            f"border:1px solid {C_BORDER};border-radius:5px;padding:6px 18px;}}"
+            f"QPushButton:hover{{background:{C_BORDER2};}}"
+        )
         layout.addWidget(btns)
 
     def _validate(self):
@@ -239,42 +256,6 @@ class ChangePasswordDialog(QDialog):
         self.accept()
 
     def value(self): return self.pw.text()
-
-
-DARK_STYLE = """
-QMainWindow,QWidget{background:#0f172a;color:#e2e8f0;}
-QGroupBox{border:1px solid #1e293b;border-radius:8px;margin-top:14px;
-  padding:12px 12px 10px 12px;font-size:12px;color:#475569;}
-QGroupBox::title{subcontrol-origin:margin;left:12px;padding:0 6px;color:#475569;}
-QLabel{color:#cbd5e1;}
-QScrollBar:vertical{background:#0f172a;width:8px;border-radius:4px;}
-QScrollBar::handle:vertical{background:#334155;border-radius:4px;}
-QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{height:0;}
-QMessageBox{background:#0f172a;}QDialog{background:#0f172a;}
-QCheckBox{color:#cbd5e1;}
-QTimeEdit{background:#1e293b;border:1px solid #334155;border-radius:5px;padding:5px;color:#e2e8f0;font-size:13px;}
-QSpinBox{background:#1e293b;border:1px solid #334155;border-radius:5px;padding:5px;color:#e2e8f0;font-size:13px;}
-QComboBox{background:#1e293b;border:1px solid #334155;border-radius:5px;padding:5px 10px;color:#e2e8f0;font-size:13px;}
-QComboBox::drop-down{border:none;}
-QComboBox QAbstractItemView{background:#1e293b;color:#e2e8f0;selection-background-color:#334155;}
-"""
-
-TAB_STYLE = """
-QTabWidget::pane{border:none;background:#0f172a;}
-QTabBar::tab{background:#080f1e;color:#475569;padding:10px 16px;border:none;font-size:12px;}
-QTabBar::tab:selected{background:#0f172a;color:#e2e8f0;border-bottom:2px solid #3b82f6;}
-QTabBar::tab:hover{color:#94a3b8;}
-"""
-
-TABLE_STYLE = """
-QTableWidget{background:#0a1020;color:#e2e8f0;border:1px solid #1e293b;
-  border-radius:6px;gridline-color:#1e293b;font-size:12px;}
-QTableWidget::item{padding:5px;}
-QTableWidget::item:selected{background:#1e40af;}
-QTableWidget::item:alternate{background:#080f1e;}
-QHeaderView::section{background:#1e293b;color:#64748b;padding:6px;
-  border:none;font-size:12px;font-weight:bold;}
-"""
 
 
 class MainWindow(QMainWindow):
@@ -292,14 +273,14 @@ class MainWindow(QMainWindow):
             log_fn=self._log,
         )
 
-        self.mdns  = MDNSBroadcaster(port=self.config["port"], log_fn=self._log)
-        self.minio    = MinIOManager(self.config, log_fn=self._log)
-        self.pgadmin  = PgAdminManager(self.config, log_fn=self._log)
+        self.mdns    = MDNSBroadcaster(port=self.config["port"], log_fn=self._log)
+        self.minio   = MinIOManager(self.config, log_fn=self._log)
+        self.pgadmin = PgAdminManager(self.config, log_fn=self._log)
 
         self.setWindowTitle("PGOps")
-        self.setMinimumSize(960, 680)
-        self.resize(1100, 740)
-        self.setStyleSheet(DARK_STYLE)
+        self.setMinimumSize(1060, 700)
+        self.resize(1240, 800)
+        self.setStyleSheet(APP_STYLE)
 
         self._build_ui()
         self._build_tray()
@@ -323,334 +304,97 @@ class MainWindow(QMainWindow):
         if self.manager.is_running():
             self._load_databases_async()
 
-    # ── UI ────────────────────────────────────────────────────────────────────
     def _build_ui(self):
         root = QWidget()
         self.setCentralWidget(root)
-        vb = QVBoxLayout(root)
-        vb.setContentsMargins(0, 0, 0, 0)
-        vb.setSpacing(0)
-        vb.addWidget(self._header())
-        vb.addWidget(self._tabs())
+        h = QHBoxLayout(root)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(0)
 
-    def _header(self):
-        bar = QWidget()
-        bar.setFixedHeight(62)
-        bar.setStyleSheet("background:#080f1e;border-bottom:1px solid #1e293b;")
-        h = QHBoxLayout(bar)
-        h.setContentsMargins(18, 0, 18, 0)
-        icon = QLabel("PG")
-        icon.setStyleSheet("color:#3b82f6;font-size:20px;font-weight:900;")
-        title = QLabel("PGOps")
-        title.setStyleSheet("color:#fff;font-size:17px;font-weight:700;")
-        sub = QLabel("Portable PostgreSQL Server")
-        sub.setStyleSheet("color:#475569;font-size:11px;")
-        col = QVBoxLayout(); col.setSpacing(1)
-        col.addWidget(title); col.addWidget(sub)
-        self.badge = StatusBadge()
-        self.svc_badge = QLabel()
-        self.svc_badge.setStyleSheet("color:#475569;font-size:11px;")
-        right_col = QVBoxLayout(); right_col.setSpacing(2)
-        right_col.addWidget(self.badge); right_col.addWidget(self.svc_badge)
-        h.addWidget(icon); h.addSpacing(10); h.addLayout(col)
-        h.addStretch(); h.addLayout(right_col)
-        return bar
+        self._sidebar = Sidebar()
+        self._sidebar.nav_changed.connect(self._on_nav)
+        h.addWidget(self._sidebar)
 
-    def _tabs(self):
-        t = QTabWidget()
-        t.setStyleSheet(TAB_STYLE)
-        t.addTab(self._tab_server(),    "  Server  ")
-        t.addTab(self._tab_activity(),  "  Activity  ")
-        t.addTab(self._tab_files(),     "  Files  ")
-        t.addTab(self._tab_databases(), "  Databases  ")
-        t.addTab(self._tab_browser(),   "  Table Browser  ")
-        t.addTab(self._tab_backup(),    "  Backup & Restore  ")
-        t.addTab(self._tab_schedule(),  "  Schedule  ")
-        t.addTab(self._tab_ssl(),       "  SSL / TLS  ")
-        t.addTab(self._tab_service(),   "  Service  ")
-        t.addTab(self._tab_settings(),  "  Settings  ")
-        t.addTab(self._tab_network(),   "  Network  ")
-        t.addTab(self._tab_log(),       "  Log  ")
-        t.currentChanged.connect(self._on_tab_changed)
-        self._tabs_widget = t
-        return t
+        right = QWidget()
+        right.setStyleSheet("background:#1a1d23;")
+        rv = QVBoxLayout(right)
+        rv.setContentsMargins(0, 0, 0, 0)
+        rv.setSpacing(0)
 
-    def _tab_files(self):
+        self._hbar = HeaderBar()
+        rv.addWidget(self._hbar)
+
+        self._stack = QStackedWidget()
+        self._stack.setStyleSheet("background:#1a1d23;")
+        rv.addWidget(self._stack)
+
+        h.addWidget(right, 1)
+        self._page_idx = {}
+        self._build_pages()
+
+    def _add_page(self, key, widget):
+        self._page_idx[key] = self._stack.addWidget(widget)
+
+    def _build_pages(self):
+        self._srv_tab = ServerTab(
+            self.manager, self.config, self.minio, self.pgadmin,
+            self._start, self._stop, self._download,
+            self._start_pgadmin, self._stop_pgadmin,
+            self._open_pgadmin, self._reset_pgadmin,
+            self._log,
+        )
+        self._add_page("server", self._srv_tab)
+
+        self.activity = ActivityTab(self.config)
+        self._add_page("activity", self.activity)
+
+        self._add_page("databases", self._tab_databases())
+
+        self.browser = TableBrowser(self.config)
+        self._add_page("browser", self.browser)
+
         self.files_tab = FilesTab(self.minio)
-        return self.files_tab
+        self._add_page("files", self.files_tab)
 
-    def _on_tab_changed(self, idx: int):
-        tab_name = self._tabs_widget.tabText(idx).strip()
-        if tab_name == "Activity":
-            if hasattr(self, 'activity') and self.manager.is_running():
+        self._add_page("backup",   self._tab_backup())
+        self._add_page("schedule", self._tab_schedule())
+        self._add_page("ssl",      self._tab_ssl())
+        self._add_page("service",  self._tab_service())
+        self._add_page("settings", self._tab_settings())
+        self._add_page("network",  self._tab_network())
+        self._add_page("log",      self._tab_log())
+
+    def _on_nav(self, key):
+        self._stack.setCurrentIndex(self._page_idx.get(key, 0))
+        TITLES = {
+            "server":    ("THE COMMAND CONSOLE", "PGOps Orchestrator"),
+            "activity":  ("THE COMMAND CONSOLE", ""),
+            "databases": ("THE COMMAND CONSOLE", "Databases"),
+            "browser":   ("THE COMMAND CONSOLE", "Table Explorer"),
+            "files":     ("THE COMMAND CONSOLE", "Storage"),
+            "backup":    ("THE COMMAND CONSOLE", "Backup & Restore"),
+            "schedule":  ("THE COMMAND CONSOLE", "Schedule"),
+            "ssl":       ("THE COMMAND CONSOLE", "SSL / TLS"),
+            "service":   ("THE COMMAND CONSOLE", "Service"),
+            "settings":  ("THE COMMAND CONSOLE", "Settings"),
+            "network":   ("THE COMMAND CONSOLE", "Network"),
+            "log":       ("THE COMMAND CONSOLE", "Log"),
+        }
+        sec, pg = TITLES.get(key, ("THE COMMAND CONSOLE", ""))
+        self._hbar.set_title(sec, pg)
+        if key == "activity":
+            if self.manager.is_running():
                 self.activity.start_monitoring()
         else:
-            if hasattr(self, 'activity'):
-                self.activity.stop_monitoring()
+            self.activity.stop_monitoring()
 
-    def _tab_activity(self):
-        self.activity = ActivityMonitor(self.config)
-        return self.activity
-
-    # ── SSL / TLS tab ─────────────────────────────────────────────────────────
-    def _tab_ssl(self):
-        outer = QWidget()
-        outer_layout = QVBoxLayout(outer)
-        outer_layout.setContentsMargins(0, 0, 0, 0)
-
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setStyleSheet(
-            "QScrollArea{background:#0f172a;border:none;}"
-            "QScrollBar:vertical{background:#0f172a;width:8px;border-radius:4px;}"
-            "QScrollBar::handle:vertical{background:#334155;border-radius:4px;}"
-            "QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{height:0;}"
-        )
-
-        inner = QWidget()
-        inner.setStyleSheet("background:#0f172a;")
-        v = QVBoxLayout(inner)
-        v.setContentsMargins(22, 18, 22, 24)
-        v.setSpacing(16)
-
-        status_box = _group("SSL / TLS Status")
-        sv = status_box.layout()
-
-        self.ssl_status_lbl = QLabel("Checking...")
-        self.ssl_status_lbl.setStyleSheet("color:#94a3b8;font-size:14px;font-weight:bold;")
-        sv.addWidget(self.ssl_status_lbl)
-
-        self.ssl_cert_info_lbl = _lbl("", "#64748b", 11)
-        self.ssl_cert_info_lbl.setWordWrap(True)
-        sv.addWidget(self.ssl_cert_info_lbl)
-
-        ssl_btn_row = QHBoxLayout()
-        self.btn_ssl_enable  = _btn("Enable SSL",  "#065f46", "#047857", h=36)
-        self.btn_ssl_disable = _btn("Disable SSL", "#7f1d1d", "#991b1b", "#fca5a5", h=36)
-        self.btn_ssl_enable.clicked.connect(self._enable_ssl)
-        self.btn_ssl_disable.clicked.connect(self._disable_ssl)
-        ssl_btn_row.addWidget(self.btn_ssl_enable)
-        ssl_btn_row.addWidget(self.btn_ssl_disable)
-        ssl_btn_row.addStretch()
-        sv.addLayout(ssl_btn_row)
-        v.addWidget(status_box)
-
-        cert_box = _group("Certificate")
-        cv2 = cert_box.layout()
-        cv2.addWidget(_lbl(
-            "PGOps generates a self-signed certificate valid for 10 years. "
-            "Share server.crt with client apps that need certificate verification.",
-            "#64748b", 11
-        ))
-        gen_row = QHBoxLayout()
-        self.btn_gen_cert    = _btn("Generate New Certificate", "#1d4ed8", "#1e40af", h=36)
-        self.btn_export_cert = _btn("Export server.crt",        "#1e293b", "#334155", "#94a3b8", h=36)
-        self.btn_gen_cert.clicked.connect(self._generate_cert)
-        self.btn_export_cert.clicked.connect(self._export_cert)
-        gen_row.addWidget(self.btn_gen_cert)
-        gen_row.addWidget(self.btn_export_cert)
-        gen_row.addStretch()
-        cv2.addLayout(gen_row)
-        v.addWidget(cert_box)
-
-        conn_box = _group("Connecting with SSL")
-        cnv = conn_box.layout()
-        port = self.config["port"]
-        cnv.addWidget(_lbl("Use these once SSL is enabled:", "#94a3b8"))
-        cnv.addWidget(CopyRow(
-            "URL",
-            "postgresql://user:pass@pgops.local:" + str(port) + "/dbname?sslmode=require"
-        ))
-        cnv.addWidget(CopyRow("Laravel",  "DB_SSLMODE=require  (add to .env)"))
-        cnv.addWidget(CopyRow("psycopg2", "sslmode='require'  (add to connect())"))
-        cnv.addWidget(_lbl(
-            "sslmode=require: encrypts the connection.\n"
-            "sslmode=verify-ca: also verifies the cert (give clients server.crt).",
-            "#475569", 11
-        ))
-        v.addWidget(conn_box)
-
-        v.addStretch()
-        scroll.setWidget(inner)
-        outer_layout.addWidget(scroll)
-
-        QTimer.singleShot(200, self._update_ssl_status)
-        return outer
-
-    # ── SSL actions ───────────────────────────────────────────────────────────
-    def _update_ssl_status(self):
-        if not hasattr(self, "ssl_status_lbl"):
-            return
-        try:
-            status = get_ssl_status(DATA_DIR)
-            cert_info = get_cert_info(BASE_DIR)
-        except Exception:
-            return
-        if status["enabled"]:
-            self.ssl_status_lbl.setText("SSL ENABLED")
-            self.ssl_status_lbl.setStyleSheet("color:#22c55e;font-size:14px;font-weight:bold;")
-        else:
-            self.ssl_status_lbl.setText("SSL DISABLED")
-            self.ssl_status_lbl.setStyleSheet("color:#ef4444;font-size:14px;font-weight:bold;")
-        if cert_info and "expires" in cert_info:
-            self.ssl_cert_info_lbl.setText(
-                "Certificate: " + cert_info.get("subject", "") +
-                "  |  Expires: " + cert_info.get("expires", "") +
-                "  |  Serial: "  + cert_info.get("serial", "")
-            )
-        elif not is_ssl_configured(BASE_DIR):
-            self.ssl_cert_info_lbl.setText("No certificate found -- generate one first.")
-
-    def _generate_cert(self):
-        self.btn_gen_cert.setEnabled(False)
-        def fn(_prog): return generate_certificate(BASE_DIR)
-        def done(ok, msg):
-            self.btn_gen_cert.setEnabled(True)
-            self._log(msg)
-            self._update_ssl_status()
-            if not ok: QMessageBox.critical(self, "Error", msg)
-        self._run(fn, done)
-
-    def _enable_ssl(self):
-        if not is_ssl_configured(BASE_DIR):
-            QMessageBox.warning(self, "No Certificate", "Generate a certificate first.")
-            return
-        if not self.manager.is_initialized():
-            QMessageBox.warning(self, "Not Initialized", "Start the server at least once first.")
-            return
-        def fn(_prog): return enable_ssl(BASE_DIR, DATA_DIR)
-        def done(ok, msg):
-            self._log(msg)
-            self._update_ssl_status()
-            if ok:
-                QMessageBox.information(self, "SSL Enabled", "SSL enabled. Restart the server to apply.")
-            else:
-                QMessageBox.critical(self, "Error", msg)
-        self._run(fn, done)
-
-    def _disable_ssl(self):
-        def fn(_prog): return disable_ssl(DATA_DIR)
-        def done(ok, msg):
-            self._log(msg)
-            self._update_ssl_status()
-        self._run(fn, done)
-
-    def _export_cert(self):
-        if not is_ssl_configured(BASE_DIR):
-            QMessageBox.warning(self, "No Certificate", "Generate a certificate first.")
-            return
-        dest, _ = QFileDialog.getSaveFileName(
-            self, "Export Certificate", "pgops-server.crt",
-            "Certificate Files (*.crt);;All Files (*)"
-        )
-        if dest:
-            ok, msg = export_ca_cert(BASE_DIR, dest)
-            self._log(msg)
-            if ok: QMessageBox.information(self, "Exported", msg)
-
-    # ── Server tab ────────────────────────────────────────────────────────────
-    def _tab_server(self):
-        w, v = _page()
-        row = QHBoxLayout()
-        self.btn_start = _btn("Start Server", "#1d4ed8", "#1e40af")
-        self.btn_stop  = _btn("Stop Server",  "#7f1d1d", "#991b1b", "#fca5a5")
-        self.btn_start.clicked.connect(self._start)
-        self.btn_stop.clicked.connect(self._stop)
-        row.addWidget(self.btn_start); row.addWidget(self.btn_stop)
-        v.addLayout(row)
-
-        self.prog = QProgressBar()
-        self.prog.setVisible(False); self.prog.setFixedHeight(6)
-        self.prog.setStyleSheet("QProgressBar{background:#1e293b;border-radius:3px;}QProgressBar::chunk{background:#3b82f6;border-radius:3px;}")
-        v.addWidget(self.prog)
-
-        self.notice = QLabel("PostgreSQL binaries not found. Click Setup to get started.")
-        self.notice.setWordWrap(True)
-        self.notice.setStyleSheet("background:#451a03;color:#fdba74;padding:10px 14px;border-radius:6px;font-size:12px;")
-        self.notice.setVisible(False)
-        self.btn_dl = _btn("Setup PostgreSQL", "#92400e", "#b45309", "#fef3c7")
-        self.btn_dl.clicked.connect(self._download)
-        self.btn_dl.setVisible(False)
-        v.addWidget(self.notice); v.addWidget(self.btn_dl)
-
-        box = _group("Admin Connection")
-        bv = box.layout()
-        self.cr_host = CopyRow("Host", "-")
-        self.cr_port = CopyRow("Port", str(self.config["port"]))
-        self.cr_user = CopyRow("Username", self.config["username"])
-        self.cr_pass = CopyRow("Password", self.config["password"])
-        self.cr_db   = CopyRow("Database", self.config["database"])
-        self.cr_conn = CopyRow("String", "-")
-        for r in (self.cr_host, self.cr_port, self.cr_user, self.cr_pass, self.cr_db, _sep(), self.cr_conn):
-            bv.addWidget(r)
-        v.addWidget(box)
-
-        # pgAdmin section
-        pgadmin_box = _group("pgAdmin 4 — Database Web UI")
-        pv = pgadmin_box.layout()
-
-        self.pgadmin_status_lbl = QLabel("Checking...")
-        self.pgadmin_status_lbl.setStyleSheet("color:#94a3b8;font-size:13px;font-weight:bold;")
-        pv.addWidget(self.pgadmin_status_lbl)
-
-        self.pgadmin_url_row = CopyRow("URL", f"http://pgops.local:5050")
-        pv.addWidget(self.pgadmin_url_row)
-
-        creds_lbl = QLabel("Default login:  admin@pgops.com  /  pgopsadmin")
-        creds_lbl.setStyleSheet("color:#64748b;font-size:11px;font-family:monospace;")
-        pv.addWidget(creds_lbl)
-
-        pgadmin_btn_row = QHBoxLayout()
-        self.btn_pgadmin_start = _btn("Start pgAdmin",   "#065f46", "#047857", h=34)
-        self.btn_pgadmin_stop  = _btn("Stop",            "#7f1d1d", "#991b1b", "#fca5a5", h=34)
-        self.btn_pgadmin_open  = _btn("Open in Browser", "#1d4ed8", "#1e40af", h=34)
-        self.btn_pgadmin_reset = _btn("Reset & Restart", "#92400e", "#b45309", "#fef3c7", h=34)
-        self.btn_pgadmin_start.clicked.connect(self._start_pgadmin)
-        self.btn_pgadmin_stop.clicked.connect(self._stop_pgadmin)
-        self.btn_pgadmin_open.clicked.connect(self._open_pgadmin)
-        self.btn_pgadmin_reset.clicked.connect(self._reset_pgadmin)
-        for b in (self.btn_pgadmin_start, self.btn_pgadmin_stop,
-                  self.btn_pgadmin_open, self.btn_pgadmin_reset):
-            pgadmin_btn_row.addWidget(b)
-        pgadmin_btn_row.addStretch()
-        pv.addLayout(pgadmin_btn_row)
-
-        reset_note = QLabel(
-            "If login fails: click Reset & Restart — wipes the pgAdmin database "
-            "and recreates it with the credentials shown above."
-        )
-        reset_note.setWordWrap(True)
-        reset_note.setStyleSheet(
-            "background:#1c1208;color:#f59e0b;padding:8px;"
-            "border-radius:5px;font-size:11px;"
-        )
-        pv.addWidget(reset_note)
-
-        if not self.pgadmin.is_available():
-            unavail = QLabel(
-                "pgAdmin 4 not found. It is included in the EDB PostgreSQL zip — "
-                "click Setup PostgreSQL on the Server tab first."
-            )
-            unavail.setWordWrap(True)
-            unavail.setStyleSheet(
-                "background:#1c1208;color:#f59e0b;padding:8px;"
-                "border-radius:5px;font-size:11px;"
-            )
-            pv.addWidget(unavail)
-
-        v.addWidget(pgadmin_box)
-        v.addStretch()
-        return w
-
-    # ── Databases tab ─────────────────────────────────────────────────────────
     def _tab_databases(self):
         w, v = _page()
         tb = QHBoxLayout()
-        self.btn_db_refresh = _btn("Refresh", "#1e293b", "#334155", "#94a3b8", h=32)
-        self.btn_db_create  = _btn("New Database", "#065f46", "#047857", h=32)
-        self.btn_db_drop    = _btn("Drop Selected", "#7f1d1d", "#991b1b", "#fca5a5", h=32)
-        self.btn_db_chpw    = _btn("Change Password", "#1e293b", "#334155", "#94a3b8", h=32)
+        self.btn_db_refresh = _btn("Refresh",         C_SURFACE,  C_SURFACE2, C_TEXT2, h=32)
+        self.btn_db_create  = _btn("New Database",    "#166534",  "#15803d",  "#86efac", h=32)
+        self.btn_db_drop    = _btn("Drop Selected",   "#7f1d1d",  "#991b1b",  "#fca5a5", h=32)
+        self.btn_db_chpw    = _btn("Change Password", C_SURFACE,  C_SURFACE2, C_TEXT2, h=32)
         self.btn_db_refresh.clicked.connect(self._load_databases_async)
         self.btn_db_create.clicked.connect(self._create_database)
         self.btn_db_drop.clicked.connect(self._drop_database)
@@ -659,7 +403,6 @@ class MainWindow(QMainWindow):
             tb.addWidget(b)
         tb.addStretch()
         v.addLayout(tb)
-
         self.db_table = QTableWidget(0, 3)
         self.db_table.setHorizontalHeaderLabels(["Database", "Owner", "Connection String"])
         self.db_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
@@ -670,25 +413,26 @@ class MainWindow(QMainWindow):
         self.db_table.setAlternatingRowColors(True)
         self.db_table.setStyleSheet(TABLE_STYLE)
         self.db_table.verticalHeader().setVisible(False)
+        self.db_table.verticalHeader().setDefaultSectionSize(44)
         v.addWidget(self.db_table)
-        v.addWidget(_lbl("Each database has its own owner and password.", "#475569", 11))
+        v.addWidget(_lbl("Each database has its own owner and password.", C_TEXT3, 11))
         return w
 
-    # ── Table Browser tab ─────────────────────────────────────────────────────
-    def _tab_browser(self):
-        self.browser = TableBrowser(self.config)
-        return self.browser
-
-    # ── Backup & Restore tab ──────────────────────────────────────────────────
     def _tab_backup(self):
         w, v = _page()
 
         bk = _group("Backup")
         bkv = bk.layout()
-
         r1 = QHBoxLayout()
-        r1.addWidget(_lbl("Database", "#94a3b8"))
+        r1.addWidget(_lbl("Database"))
         self.bk_db_combo = QComboBox()
+        self.bk_db_combo.setStyleSheet(
+            f"QComboBox{{background:{C_SURFACE};border:1px solid {C_BORDER};"
+            f"border-radius:6px;padding:5px 10px;color:{C_TEXT};font-size:12px;}}"
+            f"QComboBox::drop-down{{border:none;}}"
+            f"QComboBox QAbstractItemView{{background:{C_SURFACE2};color:{C_TEXT};"
+            f"selection-background-color:{C_BORDER2};}}"
+        )
         r1.addWidget(self.bk_db_combo)
         r1.addStretch()
         bkv.addLayout(r1)
@@ -696,33 +440,42 @@ class MainWindow(QMainWindow):
         r2 = QHBoxLayout()
         self.bk_dir_lbl = QLineEdit(str(dbm.BACKUP_DIR))
         self.bk_dir_lbl.setReadOnly(True)
-        self.bk_dir_lbl.setStyleSheet("background:#1e293b;border:1px solid #334155;border-radius:5px;padding:5px 10px;color:#64748b;font-size:12px;")
-        browse_btn = _btn("Browse...", "#1e293b", "#334155", "#94a3b8", h=32)
+        self.bk_dir_lbl.setStyleSheet(
+            f"QLineEdit{{background:{C_SURFACE};border:1px solid {C_BORDER};"
+            f"border-radius:6px;padding:7px 11px;color:{C_TEXT2};font-size:12px;}}"
+        )
+        browse_btn = _btn("Browse...", C_SURFACE2, C_BORDER2, C_TEXT2, h=32)
         browse_btn.clicked.connect(self._browse_backup_dir)
-        r2.addWidget(_lbl("Save to", "#94a3b8"))
+        r2.addWidget(_lbl("Save to"))
         r2.addWidget(self.bk_dir_lbl)
         r2.addWidget(browse_btn)
         bkv.addLayout(r2)
 
         self.bk_prog = QProgressBar()
-        self.bk_prog.setVisible(False); self.bk_prog.setFixedHeight(6)
-        self.bk_prog.setStyleSheet("QProgressBar{background:#1e293b;border-radius:3px;}QProgressBar::chunk{background:#22c55e;border-radius:3px;}")
+        self.bk_prog.setVisible(False)
+        self.bk_prog.setFixedHeight(3)
+        self.bk_prog.setTextVisible(False)
+        self.bk_prog.setStyleSheet(
+            f"QProgressBar{{background:{C_BORDER};border:none;}}"
+            f"QProgressBar::chunk{{background:{C_GREEN};}}"
+        )
         bkv.addWidget(self.bk_prog)
 
-        self.btn_backup = _btn("Backup Now", "#1d4ed8", "#1e40af")
+        self.btn_backup = _btn("Backup Now", C_BLUE, "#3b7de8", h=40)
         self.btn_backup.clicked.connect(self._do_backup)
         bkv.addWidget(self.btn_backup)
         v.addWidget(bk)
 
         rs = _group("Restore")
         rsv = rs.layout()
-
         tb2 = QHBoxLayout()
-        self.btn_rs_refresh = _btn("Refresh List", "#1e293b", "#334155", "#94a3b8", h=32)
-        self.btn_rs_browse  = _btn("Open File...", "#1e293b", "#334155", "#94a3b8", h=32)
+        self.btn_rs_refresh = _btn("Refresh List", C_SURFACE2, C_BORDER2, C_TEXT2, h=32)
+        self.btn_rs_browse  = _btn("Open File...", C_SURFACE2, C_BORDER2, C_TEXT2, h=32)
         self.btn_rs_refresh.clicked.connect(self._refresh_backups)
         self.btn_rs_browse.clicked.connect(self._browse_backup_file)
-        tb2.addWidget(self.btn_rs_refresh); tb2.addWidget(self.btn_rs_browse); tb2.addStretch()
+        tb2.addWidget(self.btn_rs_refresh)
+        tb2.addWidget(self.btn_rs_browse)
+        tb2.addStretch()
         rsv.addLayout(tb2)
 
         self.backup_table = QTableWidget(0, 3)
@@ -740,24 +493,28 @@ class MainWindow(QMainWindow):
         rsv.addWidget(self.backup_table)
 
         r3 = QHBoxLayout()
-        r3.addWidget(_lbl("Restore into", "#94a3b8"))
+        r3.addWidget(_lbl("Restore into"))
         self.rs_db_inp = _inp(placeholder="database name (existing or new)")
         r3.addWidget(self.rs_db_inp)
         rsv.addLayout(r3)
 
         self.rs_prog = QProgressBar()
-        self.rs_prog.setVisible(False); self.rs_prog.setFixedHeight(6)
-        self.rs_prog.setStyleSheet("QProgressBar{background:#1e293b;border-radius:3px;}QProgressBar::chunk{background:#f59e0b;border-radius:3px;}")
+        self.rs_prog.setVisible(False)
+        self.rs_prog.setFixedHeight(3)
+        self.rs_prog.setTextVisible(False)
+        self.rs_prog.setStyleSheet(
+            f"QProgressBar{{background:{C_BORDER};border:none;}}"
+            f"QProgressBar::chunk{{background:{C_AMBER};}}"
+        )
         rsv.addWidget(self.rs_prog)
 
-        self.btn_restore = _btn("Restore Selected Backup", "#7c3aed", "#6d28d9")
+        self.btn_restore = _btn("Restore Selected Backup", "#6d28d9", "#7c3aed", h=40)
         self.btn_restore.clicked.connect(self._do_restore)
         rsv.addWidget(self.btn_restore)
         v.addWidget(rs)
         v.addStretch()
         return w
 
-    # ── Schedule tab ──────────────────────────────────────────────────────────
     def _tab_schedule(self):
         w, v = _page()
         sch = self.scheduler.schedule
@@ -769,32 +526,47 @@ class MainWindow(QMainWindow):
         bv.addWidget(self.sched_enabled)
         bv.addWidget(_sep())
 
-        for label, attr, widget in [
-            ("Frequency",        "sched_freq", None),
-            ("At time (HH:MM)",  "sched_time", None),
-            ("Day (for weekly)", "sched_dow",  None),
-            ("Keep last N",      "sched_keep", None),
-        ]:
+        combo_style = (
+            f"QComboBox{{background:{C_SURFACE};border:1px solid {C_BORDER};"
+            f"border-radius:6px;padding:5px 10px;color:{C_TEXT};font-size:12px;}}"
+            f"QComboBox::drop-down{{border:none;}}"
+            f"QComboBox QAbstractItemView{{background:{C_SURFACE2};color:{C_TEXT};"
+            f"selection-background-color:{C_BORDER2};}}"
+        )
+        spin_style = (
+            f"QSpinBox{{background:{C_SURFACE};border:1px solid {C_BORDER};"
+            f"border-radius:6px;padding:5px;color:{C_TEXT};font-size:12px;}}"
+        )
+        time_style = (
+            f"QTimeEdit{{background:{C_SURFACE};border:1px solid {C_BORDER};"
+            f"border-radius:6px;padding:5px;color:{C_TEXT};font-size:12px;}}"
+        )
+
+        for label in ["Frequency", "At time (HH:MM)", "Day (for weekly)", "Keep last N"]:
             r = QHBoxLayout()
-            l = _lbl(label, "#94a3b8"); l.setFixedWidth(140)
+            l = _lbl(label); l.setFixedWidth(140)
             r.addWidget(l)
             if label == "Frequency":
                 self.sched_freq = QComboBox()
+                self.sched_freq.setStyleSheet(combo_style)
                 self.sched_freq.addItems(["hourly", "daily", "weekly"])
                 self.sched_freq.setCurrentText(sch.get("frequency", "daily"))
                 r.addWidget(self.sched_freq)
             elif label == "At time (HH:MM)":
                 self.sched_time = QTimeEdit()
+                self.sched_time.setStyleSheet(time_style)
                 t = sch.get("time", "02:00").split(":")
                 self.sched_time.setTime(QTime(int(t[0]), int(t[1])))
                 r.addWidget(self.sched_time)
             elif label == "Day (for weekly)":
                 self.sched_dow = QComboBox()
+                self.sched_dow.setStyleSheet(combo_style)
                 self.sched_dow.addItems(["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"])
                 self.sched_dow.setCurrentIndex(sch.get("day_of_week", 0))
                 r.addWidget(self.sched_dow)
             elif label == "Keep last N":
                 self.sched_keep = QSpinBox()
+                self.sched_keep.setStyleSheet(spin_style)
                 self.sched_keep.setRange(1, 365)
                 self.sched_keep.setValue(sch.get("keep_count", 7))
                 r.addWidget(self.sched_keep)
@@ -802,7 +574,7 @@ class MainWindow(QMainWindow):
             bv.addLayout(r)
 
         bv.addWidget(_sep())
-        bv.addWidget(_lbl("Databases to include:", "#94a3b8"))
+        bv.addWidget(_lbl("Databases to include:"))
         self.sched_db_list = QTableWidget(0, 2)
         self.sched_db_list.setHorizontalHeaderLabels(["", "Database"])
         self.sched_db_list.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
@@ -812,19 +584,91 @@ class MainWindow(QMainWindow):
         self.sched_db_list.setMaximumHeight(140)
         bv.addWidget(self.sched_db_list)
 
-        self.next_run_lbl = _lbl("", "#64748b", 11)
+        self.next_run_lbl = _lbl("", C_TEXT3, 11)
         bv.addWidget(self.next_run_lbl)
         v.addWidget(box)
 
-        save_btn = _btn("Save Schedule", "#1d4ed8", "#1e40af")
+        save_btn = _btn("Save Schedule", C_BLUE, "#3b7de8", h=40)
         save_btn.clicked.connect(self._save_schedule)
         v.addWidget(save_btn)
-        self.sched_status_lbl = _lbl("", "#22c55e", 12)
+        self.sched_status_lbl = _lbl("", C_GREEN, 12)
         v.addWidget(self.sched_status_lbl)
         v.addStretch()
         return w
 
-    # ── Service tab ───────────────────────────────────────────────────────────
+    def _tab_ssl(self):
+        outer = QWidget()
+        outer.setStyleSheet("background:#1a1d23;")
+        ol = QVBoxLayout(outer)
+        ol.setContentsMargins(0, 0, 0, 0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setStyleSheet("background:transparent;border:none;")
+
+        inner = QWidget()
+        inner.setStyleSheet("background:#1a1d23;")
+        v = QVBoxLayout(inner)
+        v.setContentsMargins(24, 20, 24, 24)
+        v.setSpacing(16)
+
+        status_box = _group("SSL / TLS Status")
+        sv = status_box.layout()
+        self.ssl_status_lbl = QLabel("Checking...")
+        self.ssl_status_lbl.setStyleSheet(f"color:{C_TEXT2};font-size:14px;font-weight:bold;")
+        sv.addWidget(self.ssl_status_lbl)
+        self.ssl_cert_info_lbl = _lbl("", C_TEXT3, 11)
+        self.ssl_cert_info_lbl.setWordWrap(True)
+        sv.addWidget(self.ssl_cert_info_lbl)
+        ssl_btn_row = QHBoxLayout()
+        self.btn_ssl_enable  = _btn("Enable SSL",  "#166534", "#15803d", "#86efac", h=36)
+        self.btn_ssl_disable = _btn("Disable SSL", "#7f1d1d", "#991b1b", "#fca5a5", h=36)
+        self.btn_ssl_enable.clicked.connect(self._enable_ssl)
+        self.btn_ssl_disable.clicked.connect(self._disable_ssl)
+        ssl_btn_row.addWidget(self.btn_ssl_enable)
+        ssl_btn_row.addWidget(self.btn_ssl_disable)
+        ssl_btn_row.addStretch()
+        sv.addLayout(ssl_btn_row)
+        v.addWidget(status_box)
+
+        cert_box = _group("Certificate")
+        cv2 = cert_box.layout()
+        cv2.addWidget(_lbl(
+            "PGOps generates a self-signed certificate valid for 10 years. "
+            "Share server.crt with client apps that need certificate verification.",
+            C_TEXT3, 11
+        ))
+        gen_row = QHBoxLayout()
+        self.btn_gen_cert    = _btn("Generate New Certificate", C_BLUE, "#3b7de8", h=36)
+        self.btn_export_cert = _btn("Export server.crt", C_SURFACE2, C_BORDER2, C_TEXT2, h=36)
+        self.btn_gen_cert.clicked.connect(self._generate_cert)
+        self.btn_export_cert.clicked.connect(self._export_cert)
+        gen_row.addWidget(self.btn_gen_cert)
+        gen_row.addWidget(self.btn_export_cert)
+        gen_row.addStretch()
+        cv2.addLayout(gen_row)
+        v.addWidget(cert_box)
+
+        conn_box = _group("Connecting with SSL")
+        cnv = conn_box.layout()
+        port = self.config["port"]
+        cnv.addWidget(_lbl("Use these once SSL is enabled:"))
+        cnv.addWidget(CopyRow("URL", f"postgresql://user:pass@pgops.local:{port}/dbname?sslmode=require"))
+        cnv.addWidget(CopyRow("Laravel",  "DB_SSLMODE=require  (add to .env)"))
+        cnv.addWidget(CopyRow("psycopg2", "sslmode='require'  (add to connect())"))
+        cnv.addWidget(_lbl(
+            "sslmode=require: encrypts the connection.  "
+            "sslmode=verify-ca: also verifies the cert (give clients server.crt).",
+            C_TEXT3, 11
+        ))
+        v.addWidget(conn_box)
+        v.addStretch()
+        scroll.setWidget(inner)
+        ol.addWidget(scroll)
+        QTimer.singleShot(200, self._update_ssl_status)
+        return outer
+
     def _tab_service(self):
         w, v = _page()
         info = _group("Windows Service Mode")
@@ -839,14 +683,14 @@ class MainWindow(QMainWindow):
         svc = _group("Service Control")
         sv = svc.layout()
         self.svc_status_lbl = QLabel("Checking...")
-        self.svc_status_lbl.setStyleSheet("color:#94a3b8;font-size:13px;")
+        self.svc_status_lbl.setStyleSheet(f"color:{C_TEXT2};font-size:13px;")
         sv.addWidget(self.svc_status_lbl)
 
         btn_row = QHBoxLayout()
-        self.btn_svc_install   = _btn("Install Service",  "#065f46", "#047857", h=36)
+        self.btn_svc_install   = _btn("Install Service",  "#166534", "#15803d", "#86efac", h=36)
         self.btn_svc_uninstall = _btn("Remove Service",   "#7f1d1d", "#991b1b", "#fca5a5", h=36)
-        self.btn_svc_start     = _btn("Start Service",    "#1d4ed8", "#1e40af", h=36)
-        self.btn_svc_stop      = _btn("Stop Service",     "#1e293b", "#334155", "#94a3b8", h=36)
+        self.btn_svc_start     = _btn("Start Service",    C_BLUE,    "#3b7de8", "white",   h=36)
+        self.btn_svc_stop      = _btn("Stop Service",     C_SURFACE2, C_BORDER2, C_TEXT2,  h=36)
         self.btn_svc_install.clicked.connect(self._install_service)
         self.btn_svc_uninstall.clicked.connect(self._uninstall_service)
         self.btn_svc_start.clicked.connect(self._start_service)
@@ -857,14 +701,16 @@ class MainWindow(QMainWindow):
 
         if not is_admin():
             warn = QLabel("Not running as Administrator -- service operations require admin rights.")
-            warn.setStyleSheet("color:#f59e0b;background:#1c1208;padding:8px;border-radius:5px;font-size:12px;")
+            warn.setStyleSheet(
+                f"color:{C_AMBER};background:#2a1e0a;padding:8px 12px;"
+                f"border-radius:6px;font-size:12px;"
+            )
             warn.setWordWrap(True)
             sv.addWidget(warn)
         v.addWidget(svc)
         v.addStretch()
-        return v.parentWidget() if False else w
+        return w
 
-    # ── Settings tab ─────────────────────────────────────────────────────────
     def _tab_settings(self):
         w, v = _page()
         box = _group("Admin Server Configuration")
@@ -872,64 +718,68 @@ class MainWindow(QMainWindow):
         self.s_user = _inp(self.config["username"])
         self.s_pass = _inp(self.config["password"])
         self.s_db   = _inp(self.config["database"])
-        self.s_port = QSpinBox(); self.s_port.setRange(1024, 65535); self.s_port.setValue(self.config["port"])
+        self.s_port = QSpinBox()
+        self.s_port.setRange(1024, 65535)
+        self.s_port.setValue(self.config["port"])
+        self.s_port.setStyleSheet(
+            f"QSpinBox{{background:{C_SURFACE};border:1px solid {C_BORDER};"
+            f"border-radius:6px;padding:5px;color:{C_TEXT};font-size:13px;}}"
+        )
         self.s_auto = QCheckBox("Auto-start server when app launches")
         self.s_auto.setChecked(self.config.get("autostart", False))
-        for label, widget in [("Admin Username", self.s_user), ("Admin Password", self.s_pass),
-                               ("Default Database", self.s_db), ("Port", self.s_port)]:
+        for label, widget in [
+            ("Admin Username", self.s_user), ("Admin Password", self.s_pass),
+            ("Default Database", self.s_db), ("Port", self.s_port),
+        ]:
             row = QHBoxLayout()
             lbl = _lbl(label); lbl.setFixedWidth(130)
             row.addWidget(lbl); row.addWidget(widget)
             f.addLayout(row)
         f.addWidget(self.s_auto)
         v.addWidget(box)
-        save_btn = _btn("Save Settings"); save_btn.setFixedHeight(40)
+
+        save_btn = _btn("Save Settings", C_BLUE, "#3b7de8", h=40)
         save_btn.clicked.connect(self._save_settings)
         v.addWidget(save_btn)
-        warn = _lbl("Changing admin credentials requires stopping the server and deleting pgdata/ to reinitialize.", "#475569", 11)
-        warn.setWordWrap(True); v.addWidget(warn)
-
+        warn = _lbl(
+            "Changing admin credentials requires stopping the server "
+            "and deleting pgdata/ to reinitialize.", C_TEXT3, 11
+        )
+        warn.setWordWrap(True)
+        v.addWidget(warn)
         v.addWidget(_sep())
 
         pw_box = _group("App Password")
         pv = pw_box.layout()
-        pv.addWidget(_lbl("Change the master password used to unlock PGOps on launch.", "#64748b", 11))
-        btn_change_pw = _btn("Change Password", "#1e293b", "#334155", "#94a3b8", h=36)
+        pv.addWidget(_lbl("Change the master password used to unlock PGOps on launch.", C_TEXT3, 11))
+        btn_change_pw = _btn("Change Password", C_SURFACE2, C_BORDER2, C_TEXT2, h=36)
         btn_change_pw.clicked.connect(self._change_app_password)
         pv.addWidget(btn_change_pw)
         v.addWidget(pw_box)
-
         v.addStretch()
         return w
 
-    # ── Network tab ───────────────────────────────────────────────────────────
     def _tab_network(self):
         outer = QWidget()
-        outer_layout = QVBoxLayout(outer)
-        outer_layout.setContentsMargins(0, 0, 0, 0)
-        outer_layout.setSpacing(0)
+        outer.setStyleSheet("background:#1a1d23;")
+        ol = QVBoxLayout(outer)
+        ol.setContentsMargins(0, 0, 0, 0)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        scroll.setStyleSheet(
-            "QScrollArea{background:#0f172a;border:none;}"
-            "QScrollBar:vertical{background:#0f172a;width:8px;border-radius:4px;}"
-            "QScrollBar::handle:vertical{background:#334155;border-radius:4px;}"
-            "QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{height:0;}"
-        )
+        scroll.setStyleSheet("background:transparent;border:none;")
 
         inner = QWidget()
-        inner.setStyleSheet("background:#0f172a;")
+        inner.setStyleSheet("background:#1a1d23;")
         v = QVBoxLayout(inner)
-        v.setContentsMargins(22, 18, 22, 24)
+        v.setContentsMargins(24, 20, 24, 24)
         v.setSpacing(16)
 
         iface_box = _group("Available Network Interfaces")
         iv = iface_box.layout()
-
         self.iface_table = QTableWidget(0, 3)
         self.iface_table.setHorizontalHeaderLabels(["Adapter", "IP Address", "Type"])
         self.iface_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
@@ -944,62 +794,56 @@ class MainWindow(QMainWindow):
         iv.addWidget(self.iface_table)
 
         pin_row = QHBoxLayout()
-        pin_row.addWidget(_lbl("Pinned host IP:", "#94a3b8"))
+        pin_row.addWidget(_lbl("Pinned host IP:"))
         self.pinned_ip_lbl = QLabel(self.config.get("preferred_ip", "") or "Auto-detect")
-        self.pinned_ip_lbl.setStyleSheet("color:#22c55e;font-size:13px;font-family:monospace;font-weight:bold;")
+        self.pinned_ip_lbl.setStyleSheet(
+            f"color:{C_GREEN};font-size:13px;"
+            f"font-family:'Consolas','Courier New',monospace;font-weight:bold;"
+        )
         pin_row.addWidget(self.pinned_ip_lbl)
         pin_row.addStretch()
-        btn_pin   = _btn("Pin Selected", "#1d4ed8", "#1e40af", h=30)
-        btn_unpin = _btn("Auto-detect",  "#1e293b", "#334155", "#94a3b8", h=30)
-        btn_refresh_ifaces = _btn("Refresh", "#1e293b", "#334155", "#94a3b8", h=30)
+        btn_pin            = _btn("Pin Selected", C_BLUE,     "#3b7de8",  "white",  h=30)
+        btn_unpin          = _btn("Auto-detect",  C_SURFACE2, C_BORDER2, C_TEXT2,  h=30)
+        btn_refresh_ifaces = _btn("Refresh",      C_SURFACE2, C_BORDER2, C_TEXT2,  h=30)
         btn_pin.clicked.connect(self._pin_selected_ip)
         btn_unpin.clicked.connect(self._unpin_ip)
         btn_refresh_ifaces.clicked.connect(self._refresh_interfaces)
         for b in (btn_pin, btn_unpin, btn_refresh_ifaces):
             pin_row.addWidget(b)
         iv.addLayout(pin_row)
-
         iv.addWidget(_lbl(
             "Hotspot IP (192.168.137.1) is always fixed -- pin it when using hotspot mode "
-            "so your apps always use the same address.",
-            "#64748b", 11
+            "so your apps always use the same address.", C_TEXT3, 11
         ))
         v.addWidget(iface_box)
 
         mdns_box = _group("Local Domain  --  pgops.local")
         mv = mdns_box.layout()
-
         self.mdns_status_lbl = QLabel("Checking...")
-        self.mdns_status_lbl.setStyleSheet("color:#94a3b8;font-size:13px;font-weight:bold;")
+        self.mdns_status_lbl.setStyleSheet(f"color:{C_TEXT2};font-size:13px;font-weight:bold;")
         mv.addWidget(self.mdns_status_lbl)
-
         self.mdns_host_row = CopyRow("Host", "pgops.local")
         mv.addWidget(self.mdns_host_row)
-
         mdns_btn_row = QHBoxLayout()
-        btn_mdns_start = _btn("Start Broadcasting", "#065f46", "#047857", h=32)
+        btn_mdns_start = _btn("Start Broadcasting", "#166534", "#15803d", "#86efac", h=32)
         btn_mdns_stop  = _btn("Stop",               "#7f1d1d", "#991b1b", "#fca5a5", h=32)
-        btn_mdns_test  = _btn("Test Resolution",    "#1e293b", "#334155", "#94a3b8", h=32)
+        btn_mdns_test  = _btn("Test Resolution",    C_SURFACE2, C_BORDER2, C_TEXT2,  h=32)
         btn_mdns_start.clicked.connect(self._start_mdns)
         btn_mdns_stop.clicked.connect(self._stop_mdns)
         btn_mdns_test.clicked.connect(self._test_mdns)
         for b in (btn_mdns_start, btn_mdns_stop, btn_mdns_test):
             mdns_btn_row.addWidget(b)
         mv.addLayout(mdns_btn_row)
-
         mv.addWidget(CopyRow("Conn", f"postgresql://user:pass@pgops.local:{self.config['port']}/dbname"))
-
         mv.addWidget(_lbl(
-            "pgops.local broadcasts automatically on every launch. All your apps should use pgops.local as the database host.  "
-            "Windows 10/11: native.  Older Windows: install Bonjour.  "
-            "macOS/iOS: native.  Linux: avahi-daemon.  Android: usually works.",
-            "#475569", 11
+            "pgops.local broadcasts automatically on every launch. All your apps should use pgops.local as the "
+            "database host.  Windows 10/11: native.  Older Windows: install Bonjour.  "
+            "macOS/iOS: native.  Linux: avahi-daemon.  Android: usually works.", C_TEXT3, 11
         ))
         v.addWidget(mdns_box)
 
         hs = _group("WiFi Hotspot -- Windows Mobile Hotspot")
         hv = hs.layout()
-
         r1 = QHBoxLayout()
         self.hs_ssid = _inp("PGOps-Net")
         self.hs_pw   = _inp("postgres123")
@@ -1007,51 +851,55 @@ class MainWindow(QMainWindow):
             l = _lbl(lt); l.setFixedWidth(140)
             r1.addWidget(l); r1.addWidget(fld)
         hv.addLayout(r1)
-
         r2 = QHBoxLayout()
-        hs_start    = _btn("Start Hotspot", "#065f46", "#047857", h=34)
+        hs_start    = _btn("Start Hotspot", "#166534", "#15803d", "#86efac", h=34)
         hs_stop     = _btn("Stop Hotspot",  "#7f1d1d", "#991b1b", "#fca5a5", h=34)
-        hs_settings = _btn("Open Settings", "#1e293b", "#334155", "#94a3b8", h=34)
+        hs_settings = _btn("Open Settings", C_SURFACE2, C_BORDER2, C_TEXT2,  h=34)
         hs_start.clicked.connect(self._start_hotspot)
         hs_stop.clicked.connect(self._stop_hotspot)
         hs_settings.clicked.connect(self._open_hotspot_settings)
         r2.addWidget(hs_start); r2.addWidget(hs_stop); r2.addWidget(hs_settings)
         hv.addLayout(r2)
-
-        self.hs_msg = _lbl("", "#94a3b8", 12)
+        self.hs_msg = _lbl("", C_TEXT2, 12)
         self.hs_msg.setWordWrap(True)
         hv.addWidget(self.hs_msg)
         v.addWidget(hs)
 
         fw = _group("Firewall -- run once as Administrator")
         fv = fw.layout()
-        self.fw_cmd = CopyRow("CMD", f'netsh advfirewall firewall add rule name="PGOps" dir=in action=allow protocol=TCP localport={self.config["port"]}')
+        self.fw_cmd = CopyRow(
+            "CMD",
+            f'netsh advfirewall firewall add rule name="PGOps" dir=in action=allow '
+            f'protocol=TCP localport={self.config["port"]}'
+        )
         fv.addWidget(self.fw_cmd)
-        fv.addWidget(_lbl("Run this once so other devices can reach the database.", "#475569", 11))
+        fv.addWidget(_lbl("Run this once so other devices can reach the database.", C_TEXT3, 11))
         v.addWidget(fw)
 
         v.addStretch()
-
         scroll.setWidget(inner)
-        outer_layout.addWidget(scroll)
-
+        ol.addWidget(scroll)
         QTimer.singleShot(300, self._refresh_interfaces)
         return outer
 
-    # ── Log tab ───────────────────────────────────────────────────────────────
     def _tab_log(self):
         w, v = _page()
         self.log_box = QTextEdit()
         self.log_box.setReadOnly(True)
-        self.log_box.setStyleSheet("background:#020617;color:#86efac;font-family:monospace;font-size:12px;border:1px solid #1e293b;border-radius:6px;padding:8px;")
-        clr = _btn("Clear Log", "#1e293b", "#334155", "#94a3b8", h=30)
+        self.log_box.setStyleSheet(
+            f"background:{C_SURFACE};color:{C_GREEN};"
+            f"font-family:'Consolas','Courier New',monospace;"
+            f"font-size:12px;border:1px solid {C_BORDER};border-radius:8px;padding:10px;"
+        )
+        clr = _btn("Clear Log", C_SURFACE2, C_BORDER2, C_TEXT2, h=30)
         clr.clicked.connect(self.log_box.clear)
-        v.addWidget(self.log_box); v.addWidget(clr)
+        v.addWidget(self.log_box)
+        v.addWidget(clr)
         return w
 
-    # ── Tray ──────────────────────────────────────────────────────────────────
     def _build_tray(self):
-        px = QPixmap(16, 16); px.fill(QColor("#3b82f6"))
+        px = QPixmap(16, 16)
+        px.fill(QColor(C_BLUE))
         self.tray = QSystemTrayIcon(QIcon(px), self)
         m = QMenu()
         m.addAction(QAction("Show",         self, triggered=self.show))
@@ -1062,11 +910,13 @@ class MainWindow(QMainWindow):
         m.addAction(QAction("Quit",         self, triggered=self._quit))
         self.tray.setContextMenu(m)
         self.tray.activated.connect(
-            lambda r: self.show() if r == QSystemTrayIcon.ActivationReason.DoubleClick else None)
+            lambda r: self.show() if r == QSystemTrayIcon.ActivationReason.DoubleClick else None
+        )
         self.tray.show()
 
     def closeEvent(self, e):
-        e.ignore(); self.hide()
+        e.ignore()
+        self.hide()
         self.tray.showMessage("PGOps", "Running in system tray.", QSystemTrayIcon.MessageIcon.Information, 2000)
 
     def _quit(self):
@@ -1080,18 +930,20 @@ class MainWindow(QMainWindow):
             self.manager.stop()
         QApplication.quit()
 
-    # ── Server actions ────────────────────────────────────────────────────────
     def _start(self):
         if not self.manager.is_binaries_available():
-            self.notice.setVisible(True); self.btn_dl.setVisible(True); return
-        self.badge.starting(); self.btn_start.setEnabled(False)
+            self._srv_tab.show_warn(True)
+            return
+        self._srv_tab.btn_start.setEnabled(False)
         def fn(_prog): return self.manager.start(), ""
         self._run(fn, self._on_start_done)
 
     def _on_start_done(self, ok, msg):
-        self.btn_start.setEnabled(True); self._poll()
+        self._srv_tab.btn_start.setEnabled(True)
+        self._poll()
         if ok:
-            self._load_databases_async(); self._refresh_backups()
+            self._load_databases_async()
+            self._refresh_backups()
             self._update_ssl_status()
             if not self.minio.is_running() and self.minio.is_binaries_available():
                 def _start_minio(_p): return self.minio.start()
@@ -1104,31 +956,32 @@ class MainWindow(QMainWindow):
                 ))
 
     def _stop(self):
-        self.btn_stop.setEnabled(False)
+        self._srv_tab.btn_stop.setEnabled(False)
         if self.minio.is_running():
             self.minio.stop()
         if self.pgadmin.is_running():
             self.pgadmin.stop()
         def fn(_prog): return self.manager.stop(), ""
-        self._run(fn, lambda ok, msg: (self.btn_stop.setEnabled(True), self._poll()))
+        self._run(fn, lambda ok, msg: (self._srv_tab.btn_stop.setEnabled(True), self._poll()))
 
     def _download(self):
-        self.btn_dl.setEnabled(False); self.prog.setVisible(True); self.prog.setValue(0)
+        self._srv_tab.btn_setup.setEnabled(False)
+        self._srv_tab.set_progress(True, 0)
         def fn(prog_cb):
             self.manager.setup_binaries(progress_callback=prog_cb)
             return True, ""
         w = self._run(fn, self._on_dl_done)
-        w.progress.connect(self.prog.setValue)
+        w.progress.connect(lambda v: self._srv_tab.set_progress(True, v))
 
     def _on_dl_done(self, ok, msg):
-        self.prog.setVisible(False); self.btn_dl.setEnabled(True)
+        self._srv_tab.set_progress(False)
+        self._srv_tab.btn_setup.setEnabled(True)
         if ok:
-            self.notice.setVisible(False); self.btn_dl.setVisible(False)
+            self._srv_tab.show_warn(False)
             self._log("Setup complete. Click Start Server.")
         else:
             self._log(f"Setup failed: {msg}")
 
-    # ── Database loading ───────────────────────────────────────────────────────
     def _load_databases_async(self):
         if not self.manager.is_running():
             return
@@ -1136,7 +989,6 @@ class MainWindow(QMainWindow):
         def fn(_prog):
             dbs = dbm.list_databases(cfg["username"], cfg["password"], cfg["port"])
             return True, dbs
-
         def done(ok, raw):
             if ok:
                 try:
@@ -1144,17 +996,14 @@ class MainWindow(QMainWindow):
                     self._populate_db_list(dbs)
                 except Exception as e:
                     self._log(f"DB list error: {e}")
-
         self._run(fn, done)
 
     def _populate_db_list(self, dbs):
         self._db_list = dbs
         ip   = self.manager.get_lan_ip()
         port = self.config["port"]
-
         self.db_table.setRowCount(0)
         self.bk_db_combo.clear()
-
         for db in dbs:
             row = self.db_table.rowCount()
             self.db_table.insertRow(row)
@@ -1163,7 +1012,6 @@ class MainWindow(QMainWindow):
             conn = f"postgresql://{db['owner']}:<pw>@{ip}:{port}/{db['name']}"
             self.db_table.setItem(row, 2, QTableWidgetItem(conn))
             self.bk_db_combo.addItem(db["name"])
-
         self.browser.refresh_databases(dbs)
         self._refresh_sched_db_list(dbs)
 
@@ -1186,11 +1034,12 @@ class MainWindow(QMainWindow):
         if dlg.exec() != QDialog.DialogCode.Accepted: return
         dbname, owner, password = dlg.values()
         def fn(_prog):
-            return dbm.create_database(dbname, owner, password, self.config["username"], self.config["password"], self.config["port"])
+            return dbm.create_database(dbname, owner, password,
+                                       self.config["username"], self.config["password"], self.config["port"])
         def done(ok, msg):
             self._log(msg)
             if ok: self._load_databases_async()
-            else: QMessageBox.critical(self, "Error", msg)
+            else:  QMessageBox.critical(self, "Error", msg)
         self._run(fn, done)
 
     def _drop_database(self):
@@ -1213,10 +1062,10 @@ class MainWindow(QMainWindow):
         if dlg.exec() != QDialog.DialogCode.Accepted: return
         new_pw = dlg.value()
         def fn(_prog):
-            return dbm.change_role_password(owner, new_pw, self.config["username"], self.config["password"], self.config["port"])
+            return dbm.change_role_password(owner, new_pw,
+                                            self.config["username"], self.config["password"], self.config["port"])
         self._run(fn, lambda ok, msg: self._log(msg))
 
-    # ── Backup & Restore ──────────────────────────────────────────────────────
     def _browse_backup_dir(self):
         d = QFileDialog.getExistingDirectory(self, "Select Backup Folder", str(dbm.BACKUP_DIR))
         if d: self.bk_dir_lbl.setText(d)
@@ -1244,7 +1093,9 @@ class MainWindow(QMainWindow):
                     self.rs_db_inp.setText(Path(path_str).stem.rsplit("_", 2)[0])
 
     def _browse_backup_file(self):
-        f, _ = QFileDialog.getOpenFileName(self, "Select Backup File", str(dbm.BACKUP_DIR), "Dump Files (*.dump);;All Files (*)")
+        f, _ = QFileDialog.getOpenFileName(
+            self, "Select Backup File", str(dbm.BACKUP_DIR), "Dump Files (*.dump);;All Files (*)"
+        )
         if f:
             self._selected_backup_path = Path(f)
             self.rs_db_inp.setText(Path(f).stem.rsplit("_", 2)[0])
@@ -1257,25 +1108,18 @@ class MainWindow(QMainWindow):
         if not dbname:
             QMessageBox.warning(self, "No Database", "No databases available."); return
         dest = Path(self.bk_dir_lbl.text())
-        self.bk_prog.setVisible(True); self.bk_prog.setValue(0)
+        self.bk_prog.setVisible(True)
+        self.bk_prog.setValue(0)
         self.btn_backup.setEnabled(False)
-
-        user = self.config["username"]
-        pw   = self.config["password"]
-        port = self.config["port"]
-
+        user, pw, port = self.config["username"], self.config["password"], self.config["port"]
         def fn(prog_cb):
-            return dbm.backup_database(dbname, user, pw, port,
-                                       dest_dir=dest, progress_callback=prog_cb)
-
+            return dbm.backup_database(dbname, user, pw, port, dest_dir=dest, progress_callback=prog_cb)
         def done(ok, msg):
             self.bk_prog.setVisible(False)
             self.btn_backup.setEnabled(True)
             self._log(msg)
             self._refresh_backups()
-            if not ok:
-                QMessageBox.critical(self, "Backup Failed", msg)
-
+            if not ok: QMessageBox.critical(self, "Backup Failed", msg)
         w = self._run(fn, done)
         w.progress.connect(self.bk_prog.setValue)
 
@@ -1291,31 +1135,22 @@ class MainWindow(QMainWindow):
             f"Restore '{self._selected_backup_path.name}' into '{dbname}'?\nExisting data will be replaced.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         ) != QMessageBox.StandardButton.Yes: return
-
-        self.rs_prog.setVisible(True); self.rs_prog.setValue(0)
+        self.rs_prog.setVisible(True)
+        self.rs_prog.setValue(0)
         self.btn_restore.setEnabled(False)
-
-        user = self.config["username"]
-        pw   = self.config["password"]
-        port = self.config["port"]
+        user, pw, port = self.config["username"], self.config["password"], self.config["port"]
         backup_path = self._selected_backup_path
-
         def fn(prog_cb):
-            return dbm.restore_database(backup_path, dbname, user, pw, port,
-                                        progress_callback=prog_cb)
-
+            return dbm.restore_database(backup_path, dbname, user, pw, port, progress_callback=prog_cb)
         def done(ok, msg):
             self.rs_prog.setVisible(False)
             self.btn_restore.setEnabled(True)
             self._log(msg)
             self._load_databases_async()
-            if not ok:
-                QMessageBox.critical(self, "Restore Failed", msg)
-
+            if not ok: QMessageBox.critical(self, "Restore Failed", msg)
         w = self._run(fn, done)
         w.progress.connect(self.rs_prog.setValue)
 
-    # ── Schedule ──────────────────────────────────────────────────────────────
     def _save_schedule(self):
         selected_dbs = []
         for row in range(self.sched_db_list.rowCount()):
@@ -1338,23 +1173,24 @@ class MainWindow(QMainWindow):
         self._log(f"Schedule saved. {status}")
 
     def _scheduled_backup_fn(self, dbname):
-        return dbm.backup_database(dbname, self.config["username"], self.config["password"], self.config["port"])
+        return dbm.backup_database(
+            dbname, self.config["username"], self.config["password"], self.config["port"]
+        )
 
-    # ── Service ───────────────────────────────────────────────────────────────
     def _update_service_status(self):
+        if not hasattr(self, "svc_status_lbl"):
+            return
         if platform.system() != "Windows":
             self.svc_status_lbl.setText("Service management is Windows-only.")
             return
         if service_exists():
             running = service_running()
-            state, color = ("RUNNING", "#22c55e") if running else ("STOPPED", "#ef4444")
+            state, color = ("RUNNING", C_GREEN) if running else ("STOPPED", C_RED)
             self.svc_status_lbl.setText(f"Service installed -- {state}")
             self.svc_status_lbl.setStyleSheet(f"color:{color};font-size:13px;")
-            self.svc_badge.setText("(service mode)")
         else:
             self.svc_status_lbl.setText("Service not installed -- app mode")
-            self.svc_status_lbl.setStyleSheet("color:#475569;font-size:13px;")
-            self.svc_badge.setText("")
+            self.svc_status_lbl.setStyleSheet(f"color:{C_TEXT3};font-size:13px;")
 
     def _install_service(self):
         if not is_admin():
@@ -1381,41 +1217,41 @@ class MainWindow(QMainWindow):
         def fn(_prog): return stop_service()
         self._run(fn, lambda ok, msg: (self._log(msg), self._update_service_status()))
 
-    # ── Settings ──────────────────────────────────────────────────────────────
     def _save_settings(self):
         self.config.update({
-            "username": self.s_user.text().strip(), "password": self.s_pass.text().strip(),
-            "database": self.s_db.text().strip(),   "port": self.s_port.value(),
+            "username": self.s_user.text().strip(),
+            "password": self.s_pass.text().strip(),
+            "database": self.s_db.text().strip(),
+            "port":     self.s_port.value(),
             "autostart": self.s_auto.isChecked(),
         })
         save_config(self.config)
-        self.manager.config = self.config
+        self.manager.config    = self.config
+        self.minio.config      = self.config
+        self.pgadmin.pg_config = self.config
         self.browser.update_config(self.config)
         self.activity.update_config(self.config)
         self._log("Settings saved. Restart server to apply.")
         QMessageBox.information(self, "Saved", "Settings saved successfully.")
 
-    # ── App password ──────────────────────────────────────────────────────────
     def _change_app_password(self):
         dlg = ChangePwDialog(self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             QMessageBox.information(self, "Password Changed", "Master password updated successfully.")
             self._log("App password changed.")
 
-    # ── pgAdmin actions ───────────────────────────────────────────────────────
     def _start_pgadmin(self):
         if not self.pgadmin.is_available():
-            QMessageBox.warning(self, "Not Available", "pgAdmin 4 not found in PostgreSQL bundle. Run Setup PostgreSQL first.")
-            return
-        self.btn_pgadmin_start.setEnabled(False)
+            QMessageBox.warning(self, "Not Available",
+                "pgAdmin 4 not found in PostgreSQL bundle. Run Setup PostgreSQL first."); return
+        self._srv_tab.btn_pga_start.setEnabled(False)
         def fn(_prog): return self.pgadmin.start()
         def done(ok, msg):
-            self.btn_pgadmin_start.setEnabled(True)
+            self._srv_tab.btn_pga_start.setEnabled(True)
             self._log(f"[pgAdmin] {msg}")
             self._update_pgadmin_status()
             if ok:
-                import webbrowser
-                webbrowser.open(self.pgadmin.url())
+                import webbrowser; webbrowser.open(self.pgadmin.url())
         self._run(fn, done)
 
     def _stop_pgadmin(self):
@@ -1428,10 +1264,8 @@ class MainWindow(QMainWindow):
     def _open_pgadmin(self):
         if not self.pgadmin.is_running():
             QMessageBox.information(self, "pgAdmin Not Running",
-                "Start pgAdmin first using the Start pgAdmin button.")
-            return
-        import webbrowser
-        webbrowser.open(self.pgadmin.url())
+                "Start pgAdmin first using the Start pgAdmin button."); return
+        import webbrowser; webbrowser.open(self.pgadmin.url())
 
     def _reset_pgadmin(self):
         reply = QMessageBox.question(
@@ -1446,53 +1280,33 @@ class MainWindow(QMainWindow):
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
-        if reply != QMessageBox.StandardButton.Yes:
-            return
-
-        self.btn_pgadmin_reset.setEnabled(False)
-        self.btn_pgadmin_start.setEnabled(False)
+        if reply != QMessageBox.StandardButton.Yes: return
+        self._srv_tab.btn_pga_reset.setEnabled(False)
+        self._srv_tab.btn_pga_start.setEnabled(False)
         self._log("[pgAdmin] Resetting and restarting…")
-
-        def fn(_prog):
-            return self.pgadmin.reset_and_restart()
-
+        def fn(_prog): return self.pgadmin.reset_and_restart()
         def done(ok, msg):
-            self.btn_pgadmin_reset.setEnabled(True)
-            self.btn_pgadmin_start.setEnabled(True)
+            self._srv_tab.btn_pga_reset.setEnabled(True)
+            self._srv_tab.btn_pga_start.setEnabled(True)
             self._log(f"[pgAdmin] {msg}")
             self._update_pgadmin_status()
             if ok:
-                import webbrowser
-                webbrowser.open(self.pgadmin.url())
-
+                import webbrowser; webbrowser.open(self.pgadmin.url())
         self._run(fn, done)
 
     def _update_pgadmin_status(self):
-        if not hasattr(self, "pgadmin_status_lbl"):
-            return
-        if not self.pgadmin.is_available():
-            self.pgadmin_status_lbl.setText("Not available -- Setup PostgreSQL first")
-            self.pgadmin_status_lbl.setStyleSheet("color:#475569;font-size:13px;font-weight:bold;")
-            return
-        if self.pgadmin.is_running():
-            self.pgadmin_status_lbl.setText(f"RUNNING  --  {self.pgadmin.url()}")
-            self.pgadmin_status_lbl.setStyleSheet("color:#22c55e;font-size:13px;font-weight:bold;")
-            self.pgadmin_url_row.set(self.pgadmin.url())
-        else:
-            self.pgadmin_status_lbl.setText("STOPPED")
-            self.pgadmin_status_lbl.setStyleSheet("color:#ef4444;font-size:13px;font-weight:bold;")
+        self._srv_tab.update_pgadmin_status(self.pgadmin.is_running(), self.pgadmin.is_available())
 
-    # ── Network helpers ───────────────────────────────────────────────────────
     def _start_hotspot(self):
         ok, msg = start_hotspot(self.hs_ssid.text(), self.hs_pw.text())
         self.hs_msg.setText(msg)
-        self.hs_msg.setStyleSheet(f"color:{'#22c55e' if ok else '#ef4444'};font-size:12px;")
+        self.hs_msg.setStyleSheet(f"color:{C_GREEN if ok else C_RED};font-size:12px;")
         self._log(msg)
 
     def _stop_hotspot(self):
         ok, msg = stop_hotspot()
         self.hs_msg.setText(msg)
-        self.hs_msg.setStyleSheet(f"color:{'#22c55e' if ok else '#ef4444'};font-size:12px;")
+        self.hs_msg.setStyleSheet(f"color:{C_GREEN if ok else C_RED};font-size:12px;")
         self._log(msg)
 
     def _open_hotspot_settings(self):
@@ -1513,13 +1327,11 @@ class MainWindow(QMainWindow):
         reply = QMessageBox.question(
             self, "Stop Broadcasting",
             "pgops.local is the hostname all your apps use for connections.\n"
-            "Stopping it will make pgops.local unreachable.\n\n"
-            "Are you sure?",
+            "Stopping it will make pgops.local unreachable.\n\nAre you sure?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No
         )
-        if reply != QMessageBox.StandardButton.Yes:
-            return
+        if reply != QMessageBox.StandardButton.Yes: return
         ok, msg = self.mdns.stop()
         self._log(msg)
         self._update_mdns_status()
@@ -1527,7 +1339,7 @@ class MainWindow(QMainWindow):
     def _test_mdns(self):
         ok, msg = verify_mdns_resolution()
         self._log(f"[mDNS Test] {msg}")
-        color = "#22c55e" if ok else "#ef4444"
+        color = C_GREEN if ok else C_RED
         self.mdns_status_lbl.setStyleSheet(f"color:{color};font-size:13px;font-weight:bold;")
         self.mdns_status_lbl.setText(msg)
 
@@ -1537,34 +1349,26 @@ class MainWindow(QMainWindow):
         if self.mdns.is_running():
             ip = self.manager.get_lan_ip()
             self.mdns_status_lbl.setText("BROADCASTING  pgops.local  ->  " + ip)
-            self.mdns_status_lbl.setStyleSheet("color:#22c55e;font-size:13px;font-weight:bold;")
+            self.mdns_status_lbl.setStyleSheet(f"color:{C_GREEN};font-size:13px;font-weight:bold;")
             self.mdns_host_row.set("pgops.local")
         else:
             self.mdns_status_lbl.setText("Not broadcasting -- click Start Broadcasting to resume")
-            self.mdns_status_lbl.setStyleSheet("color:#ef4444;font-size:13px;font-weight:bold;")
+            self.mdns_status_lbl.setStyleSheet(f"color:{C_RED};font-size:13px;font-weight:bold;")
 
     def _refresh_interfaces(self):
         try:
             ifaces = get_all_interfaces()
         except Exception as e:
-            self._log(f"Interface scan error: {e}")
-            return
-
+            self._log(f"Interface scan error: {e}"); return
         self.iface_table.setRowCount(0)
         pinned = self.config.get("preferred_ip", "")
         type_colors = {
-            "hotspot":  "#22c55e",
-            "lan":      "#3b82f6",
-            "wifi":     "#a78bfa",
-            "loopback": "#475569",
-            "other":    "#94a3b8",
+            "hotspot": C_GREEN, "lan": C_BLUE, "wifi": C_PURPLE,
+            "loopback": C_TEXT3, "other": C_TEXT2,
         }
         type_labels = {
-            "hotspot":  "Hotspot (fixed)",
-            "lan":      "Ethernet LAN",
-            "wifi":     "Wi-Fi",
-            "loopback": "Loopback",
-            "other":    "Other",
+            "hotspot": "Hotspot (fixed)", "lan": "Ethernet LAN", "wifi": "Wi-Fi",
+            "loopback": "Loopback", "other": "Other",
         }
         for iface in ifaces:
             row = self.iface_table.rowCount()
@@ -1572,11 +1376,10 @@ class MainWindow(QMainWindow):
             name_item = QTableWidgetItem(iface["name"])
             ip_item   = QTableWidgetItem(iface["ip"])
             type_item = QTableWidgetItem(type_labels.get(iface["type"], iface["type"]))
-            color = type_colors.get(iface["type"], "#94a3b8")
+            color = type_colors.get(iface["type"], C_TEXT2)
             for item in (name_item, ip_item, type_item):
                 item.setForeground(QColor(color))
             if iface["ip"] == pinned or iface["type"] == "hotspot":
-                from PyQt6.QtGui import QFont
                 f = QFont(); f.setBold(True)
                 for item in (name_item, ip_item, type_item):
                     item.setFont(f)
@@ -1584,15 +1387,12 @@ class MainWindow(QMainWindow):
             self.iface_table.setItem(row, 0, name_item)
             self.iface_table.setItem(row, 1, ip_item)
             self.iface_table.setItem(row, 2, type_item)
-
-        pinned_display = pinned if pinned else "Auto-detect"
-        self.pinned_ip_lbl.setText(pinned_display)
+        self.pinned_ip_lbl.setText(pinned if pinned else "Auto-detect")
 
     def _pin_selected_ip(self):
         row = self.iface_table.currentRow()
         if row < 0:
-            QMessageBox.information(self, "Select an IP", "Click a row in the interface table first.")
-            return
+            QMessageBox.information(self, "Select an IP", "Click a row in the interface table first."); return
         ip_item = self.iface_table.item(row, 1)
         if not ip_item: return
         ip = ip_item.data(Qt.ItemDataRole.UserRole) or ip_item.text()
@@ -1611,30 +1411,89 @@ class MainWindow(QMainWindow):
         self._log("IP pin removed -- auto-detect enabled.")
         self._poll()
 
-    # ── Poll ──────────────────────────────────────────────────────────────────
+    def _update_ssl_status(self):
+        if not hasattr(self, "ssl_status_lbl"):
+            return
+        try:
+            status    = get_ssl_status(DATA_DIR)
+            cert_info = get_cert_info(BASE_DIR)
+        except Exception:
+            return
+        if status["enabled"]:
+            self.ssl_status_lbl.setText("SSL ENABLED")
+            self.ssl_status_lbl.setStyleSheet(f"color:{C_GREEN};font-size:14px;font-weight:bold;")
+        else:
+            self.ssl_status_lbl.setText("SSL DISABLED")
+            self.ssl_status_lbl.setStyleSheet(f"color:{C_RED};font-size:14px;font-weight:bold;")
+        if cert_info and "expires" in cert_info:
+            self.ssl_cert_info_lbl.setText(
+                "Certificate: " + cert_info.get("subject", "") +
+                "  |  Expires: " + cert_info.get("expires", "") +
+                "  |  Serial: "  + cert_info.get("serial", "")
+            )
+        elif not is_ssl_configured(BASE_DIR):
+            self.ssl_cert_info_lbl.setText("No certificate found -- generate one first.")
+
+    def _generate_cert(self):
+        self.btn_gen_cert.setEnabled(False)
+        def fn(_prog): return generate_certificate(BASE_DIR)
+        def done(ok, msg):
+            self.btn_gen_cert.setEnabled(True)
+            self._log(msg)
+            self._update_ssl_status()
+            if not ok: QMessageBox.critical(self, "Error", msg)
+        self._run(fn, done)
+
+    def _enable_ssl(self):
+        if not is_ssl_configured(BASE_DIR):
+            QMessageBox.warning(self, "No Certificate", "Generate a certificate first."); return
+        if not self.manager.is_initialized():
+            QMessageBox.warning(self, "Not Initialized", "Start the server at least once first."); return
+        def fn(_prog): return enable_ssl(BASE_DIR, DATA_DIR)
+        def done(ok, msg):
+            self._log(msg)
+            self._update_ssl_status()
+            if ok: QMessageBox.information(self, "SSL Enabled", "SSL enabled. Restart the server to apply.")
+            else:  QMessageBox.critical(self, "Error", msg)
+        self._run(fn, done)
+
+    def _disable_ssl(self):
+        def fn(_prog): return disable_ssl(DATA_DIR)
+        self._run(fn, lambda ok, msg: (self._log(msg), self._update_ssl_status()))
+
+    def _export_cert(self):
+        if not is_ssl_configured(BASE_DIR):
+            QMessageBox.warning(self, "No Certificate", "Generate a certificate first."); return
+        dest, _ = QFileDialog.getSaveFileName(
+            self, "Export Certificate", "pgops-server.crt", "Certificate Files (*.crt);;All Files (*)"
+        )
+        if dest:
+            ok, msg = export_ca_cert(BASE_DIR, dest)
+            self._log(msg)
+            if ok: QMessageBox.information(self, "Exported", msg)
+
     def _poll(self):
         running = self.manager.is_running()
+        cfg = {**self.config}
         if running:
-            self.badge.running()
             d = self.manager.connection_details()
-            self.cr_host.set(d["host"]); self.cr_port.set(str(d["port"]))
-            self.cr_user.set(d["username"]); self.cr_pass.set(d["password"])
-            self.cr_db.set(d["database"]); self.cr_conn.set(self.manager.connection_string())
-        else:
-            self.badge.stopped()
+            cfg["_host"] = self.manager.get_lan_ip()
+            cfg.update(d)
+        self._srv_tab.update_server_status(running, cfg, self.manager.connection_string() if running else "")
         if not self.manager.is_binaries_available():
-            self.notice.setVisible(True); self.btn_dl.setVisible(True)
+            self._srv_tab.show_warn(True)
         self._update_service_status()
         self._update_mdns_status()
         self._update_pgadmin_status()
         if hasattr(self, 'next_run_lbl'):
             self.next_run_lbl.setText(f"Next run: {self.scheduler.next_run_str()}")
 
-    # ── Internals ─────────────────────────────────────────────────────────────
     def _log(self, msg):
         if hasattr(self, 'log_box'):
             self.log_box.append(str(msg))
             self.log_box.verticalScrollBar().setValue(self.log_box.verticalScrollBar().maximum())
+        if hasattr(self, '_srv_tab'):
+            self._srv_tab.append_log(str(msg))
 
     def _run(self, fn, on_done) -> Worker:
         w = Worker(fn)
