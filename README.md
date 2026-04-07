@@ -1,5 +1,13 @@
-# PGOps — Documentation
 
+
+
+<img width="1600" height="1280" alt="dashboard" src="https://github.com/user-attachments/assets/f574541f-e0f6-4da5-8431-fb340ee61f32" />
+
+<img width="1600" height="1471" alt="screen" src="https://github.com/user-attachments/assets/903f8817-0174-40c3-a751-08ddd05be91b" />
+
+<img width="1600" height="1292" alt="activity" src="https://github.com/user-attachments/assets/db1cfb72-df5e-48ff-b173-54cb4dddc63e" />
+
+# PGOps — Documentation
 **PGOps** is a portable, self-contained server management application for Windows and macOS.
 It provides a local area network (LAN) infrastructure layer for desktop and web applications
 built with frameworks like Laravel and NativePHP — handling database hosting, file storage,
