@@ -581,13 +581,7 @@ class AppsTab(QWidget):
             thh.addWidget(lbl)
         cv.addWidget(th)
 
-        # App rows container
-        self._rows_container = QWidget()
-        self._rows_container.setStyleSheet("background:transparent;")
-        self._rows_layout = QVBoxLayout(self._rows_container)
-        self._rows_layout.setContentsMargins(0, 0, 0, 0)
-        self._rows_layout.setSpacing(0)
-
+        # ── FIX: empty label lives directly in the card layout, NOT in rows_layout ──
         self._empty_lbl = QLabel(
             "No apps deployed yet. Click  +  Deploy New App  to get started."
         )
@@ -595,8 +589,17 @@ class AppsTab(QWidget):
         self._empty_lbl.setStyleSheet(
             f"color:{C_TEXT3};font-size:12px;padding:40px;background:transparent;"
         )
-        self._rows_layout.addWidget(self._empty_lbl)
+        cv.addWidget(self._empty_lbl)
+
+        # Rows container is a separate sibling — shown/hidden independently
+        self._rows_container = QWidget()
+        self._rows_container.setStyleSheet("background:transparent;")
+        self._rows_container.setVisible(False)
+        self._rows_layout = QVBoxLayout(self._rows_container)
+        self._rows_layout.setContentsMargins(0, 0, 0, 0)
+        self._rows_layout.setSpacing(0)
         cv.addWidget(self._rows_container)
+
         bv.addWidget(card)
         bv.addStretch()
         scroll.setWidget(body)
@@ -650,7 +653,7 @@ class AppsTab(QWidget):
             if live:
                 app["status"] = live
 
-        # Rebuild rows
+        # Clear existing rows safely — _empty_lbl is NOT in this layout
         while self._rows_layout.count():
             child = self._rows_layout.takeAt(0)
             if child.widget():
@@ -662,11 +665,12 @@ class AppsTab(QWidget):
         )
 
         if not apps:
-            self._rows_layout.addWidget(self._empty_lbl)
             self._empty_lbl.setVisible(True)
+            self._rows_container.setVisible(False)
             return
 
         self._empty_lbl.setVisible(False)
+        self._rows_container.setVisible(True)
         for app in apps:
             self._rows_layout.addWidget(self._make_row(app))
 

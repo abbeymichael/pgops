@@ -1,7 +1,8 @@
 """
 main_window.py  — Phase 2 edition
-Adds: DNS server, Caddy, FrankenPHP app manager, Apps tab, DNS tab,
-      internal API server, landing page server.
+Wires DNS, Caddy, FrankenPHP, Apps tab, DNS tab, API server, landing server.
+ServerTab receives setup/start/stop callbacks for Caddy and FrankenPHP
+exactly as pgAdmin does, plus progress bars for their setup downloads.
 """
 
 import platform
@@ -26,11 +27,14 @@ import core.db_manager as dbm
 from core.minio_manager import MinIOManager
 from core.pgadmin_manager import PgAdminManager
 
-# ── Phase 2 imports ───────────────────────────────────────────────────────────
+# Phase 2
 from core.dns_server import DNSServerThread
-from core.caddy_manager import CaddyManager
-from core.frankenphp_manager import AppProcessManager
-from core.app_manager import load_apps, save_apps, upsert_app
+from core.caddy_manager import CaddyManager, setup_caddy_binary
+from core.frankenphp_manager import (
+    AppProcessManager, setup_frankenphp_binary,
+    is_frankenphp_available,
+)
+from core.app_manager import load_apps
 from core.api_server import APIServer
 from core.landing_server import LandingServer
 
@@ -43,8 +47,8 @@ from ui.tab_settings   import SettingsTab
 from ui.tab_network    import NetworkTab
 from ui.tab_ssl        import SslTab
 from ui.tab_service    import ServiceTab
-from ui.tab_apps       import AppsTab        # Phase 2
-from ui.tab_dns        import DnsTab         # Phase 2
+from ui.tab_apps       import AppsTab
+from ui.tab_dns        import DnsTab
 from ui.files_tab      import FilesTab
 from ui.sidebar        import Sidebar
 from ui.header_bar     import HeaderBar
@@ -55,7 +59,7 @@ from ui.theme import (
 )
 
 
-# ── Worker ────────────────────────────────────────────────────────────────────
+# ── Workers ───────────────────────────────────────────────────────────────────
 
 class Worker(QThread):
     done     = pyqtSignal(bool, str)
@@ -113,20 +117,16 @@ class MainWindow(QMainWindow):
         self.minio   = MinIOManager(self.config, log_fn=self._log)
         self.pgadmin = PgAdminManager(self.config, log_fn=self._log)
 
-        # ── Phase 2 components ─────────────────────────────────────────────────
-        self.dns_server = DNSServerThread(
-            host_ip=self.manager.get_lan_ip(), log_fn=self._log
-        )
-        self.caddy = CaddyManager(self.config, log_fn=self._log)
-        self.app_procs = AppProcessManager(log_fn=self._log)
-
-        self.landing_server = LandingServer(
+        # Phase 2 components
+        self.dns_server  = DNSServerThread(host_ip=self.manager.get_lan_ip(), log_fn=self._log)
+        self.caddy       = CaddyManager(self.config, log_fn=self._log)
+        self.app_procs   = AppProcessManager(log_fn=self._log)
+        self.landing_srv = LandingServer(
             get_apps=load_apps,
             get_host_ip=self.manager.get_lan_ip,
             log_fn=self._log,
         )
-
-        self.api_server = APIServer(
+        self.api_server  = APIServer(
             app_registry_fn=load_apps,
             process_manager=self.app_procs,
             postgres_manager=self.manager,
@@ -135,7 +135,6 @@ class MainWindow(QMainWindow):
             admin_config=self.config,
             log_fn=self._log,
         )
-        # ──────────────────────────────────────────────────────────────────────
 
         self.setWindowTitle("PGOps")
         self.setMinimumSize(1060, 700)
@@ -153,7 +152,6 @@ class MainWindow(QMainWindow):
 
         if self.config.get("autostart"):
             QTimer.singleShot(800, self._start)
-
         if self.scheduler.schedule.get("enabled"):
             self.scheduler.start()
 
@@ -164,7 +162,7 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(800,  self._start_api_server)
         QTimer.singleShot(2000, self._start_caddy_and_apps)
 
-    # ── Startup helpers ───────────────────────────────────────────────────────
+    # ── Phase 2 startup helpers ───────────────────────────────────────────────
 
     def _start_dns(self):
         ok, msg = self.dns_server.start()
@@ -173,7 +171,7 @@ class MainWindow(QMainWindow):
             self._dns_tab.refresh()
 
     def _start_landing_server(self):
-        ok, msg = self.landing_server.start()
+        ok, msg = self.landing_srv.start()
         self._log(msg)
 
     def _start_api_server(self):
@@ -181,20 +179,17 @@ class MainWindow(QMainWindow):
         self._log(msg)
 
     def _start_caddy_and_apps(self):
-        """Start Caddy and all 'running' apps from the registry."""
-        apps = load_apps()
+        apps         = load_apps()
         running_apps = [a for a in apps if a.get("status") == "running"]
-
-        if running_apps and not self.app_procs.is_running(running_apps[0]["id"]):
+        if running_apps:
             results = self.app_procs.start_all(running_apps)
             for app_id, ok, msg in results:
                 self._log(f"[App:{app_id}] {msg}")
-
         if self.caddy.is_available():
             ok, msg = self.caddy.start(apps)
             self._log(msg)
         else:
-            self._log("[Caddy] Binary not found — skipping. Click Setup in Apps tab.")
+            self._log("[Caddy] Binary not found — click Setup Caddy in the Server tab.")
 
     def _initial_load(self):
         self._poll()
@@ -228,19 +223,36 @@ class MainWindow(QMainWindow):
         rv.addWidget(self._stack)
 
         h.addWidget(right, 1)
-        self._page_idx = {}
+        self._page_idx: dict[str, int] = {}
         self._build_pages()
 
     def _add_page(self, key, widget):
         self._page_idx[key] = self._stack.addWidget(widget)
 
     def _build_pages(self):
+        # ServerTab now receives Caddy/FrankenPHP callbacks
         self._srv_tab = ServerTab(
-            self.manager, self.config, self.minio, self.pgadmin,
-            self._start, self._stop, self._download,
-            self._start_pgadmin, self._stop_pgadmin,
-            self._open_pgadmin, self._reset_pgadmin,
-            self._log,
+            manager=self.manager,
+            config=self.config,
+            minio=self.minio,
+            pgadmin=self.pgadmin,
+            on_start=self._start,
+            on_stop=self._stop,
+            on_download=self._download,
+            on_start_pgadmin=self._start_pgadmin,
+            on_stop_pgadmin=self._stop_pgadmin,
+            on_open_pgadmin=self._open_pgadmin,
+            on_reset_pgadmin=self._reset_pgadmin,
+            # Phase 2
+            on_setup_caddy=self._setup_caddy,
+            on_start_caddy=self._start_caddy,
+            on_stop_caddy=self._stop_caddy,
+            on_setup_frankenphp=self._setup_frankenphp,
+            on_start_frankenphp=self._start_all_apps,
+            on_stop_frankenphp=self._stop_all_apps,
+            caddy_manager=self.caddy,
+            frankenphp_manager=self.app_procs,
+            log_fn=self._log,
         )
         self._add_page("server", self._srv_tab)
 
@@ -257,7 +269,6 @@ class MainWindow(QMainWindow):
         )
         self._add_page("databases", self._db_tab)
 
-        # ── Phase 2: Apps Tab ──────────────────────────────────────────────────
         self._apps_tab = AppsTab(
             config=self.config,
             process_manager=self.app_procs,
@@ -284,18 +295,10 @@ class MainWindow(QMainWindow):
         )
         self._add_page("schedule", self._sched_tab)
 
-        self._ssl_tab = SslTab(
-            config=self.config,
-            manager=self.manager,
-            on_log=self._log,
-        )
+        self._ssl_tab = SslTab(config=self.config, manager=self.manager, on_log=self._log)
         self._add_page("ssl", self._ssl_tab)
 
-        self._svc_tab = ServiceTab(
-            config=self.config,
-            manager=self.manager,
-            on_log=self._log,
-        )
+        self._svc_tab = ServiceTab(config=self.config, manager=self.manager, on_log=self._log)
         self._add_page("service", self._svc_tab)
 
         self._settings_tab = SettingsTab(
@@ -307,19 +310,14 @@ class MainWindow(QMainWindow):
         self._add_page("settings", self._settings_tab)
 
         self._net_tab = NetworkTab(
-            config=self.config,
-            mdns=self.mdns,
-            manager=self.manager,
-            on_mdns_start=self._start_mdns,
-            on_mdns_stop=self._stop_mdns,
+            config=self.config, mdns=self.mdns, manager=self.manager,
+            on_mdns_start=self._start_mdns, on_mdns_stop=self._stop_mdns,
             on_mdns_test=self._test_mdns,
-            on_pin=self._pin_ip,
-            on_unpin=self._unpin_ip,
+            on_pin=self._pin_ip, on_unpin=self._unpin_ip,
             on_log=self._log,
         )
         self._add_page("network", self._net_tab)
 
-        # ── Phase 2: DNS Tab ───────────────────────────────────────────────────
         self._dns_tab = DnsTab(
             dns_server=self.dns_server,
             get_host_ip=self.manager.get_lan_ip,
@@ -364,7 +362,7 @@ class MainWindow(QMainWindow):
             "server":    ("THE COMMAND CONSOLE", "PGOps Orchestrator"),
             "activity":  ("THE COMMAND CONSOLE", "Activity Monitor"),
             "databases": ("THE COMMAND CONSOLE", "Databases"),
-            "apps":      ("THE COMMAND CONSOLE", "Web Applications"),   # Phase 2
+            "apps":      ("THE COMMAND CONSOLE", "Web Applications"),
             "files":     ("THE COMMAND CONSOLE", "Storage"),
             "backup":    ("THE COMMAND CONSOLE", "Backup & Restore"),
             "schedule":  ("THE COMMAND CONSOLE", "Schedule"),
@@ -372,26 +370,20 @@ class MainWindow(QMainWindow):
             "service":   ("THE COMMAND CONSOLE", "Service"),
             "settings":  ("THE COMMAND CONSOLE", "Settings"),
             "network":   ("THE COMMAND CONSOLE", "Network"),
-            "dns":       ("THE COMMAND CONSOLE", "DNS Server"),          # Phase 2
+            "dns":       ("THE COMMAND CONSOLE", "DNS Server"),
             "log":       ("THE COMMAND CONSOLE", "Log"),
         }
         sec, pg = TITLES.get(key, ("THE COMMAND CONSOLE", ""))
         self._hbar.set_title(sec, pg)
-
         if key == "activity":
             if self.manager.is_running():
                 self.activity.start_monitoring()
         else:
             self.activity.stop_monitoring()
-
-        if key == "service":
-            self._svc_tab.update_status()
-        if key == "ssl":
-            self._ssl_tab.refresh_status()
-        if key == "dns":
-            self._dns_tab.refresh()
-        if key == "apps":
-            self._apps_tab.refresh()
+        if key == "service":  self._svc_tab.update_status()
+        if key == "ssl":      self._ssl_tab.refresh_status()
+        if key == "dns":      self._dns_tab.refresh()
+        if key == "apps":     self._apps_tab.refresh()
 
     # ── Tray ──────────────────────────────────────────────────────────────────
 
@@ -417,32 +409,28 @@ class MainWindow(QMainWindow):
         self.hide()
         self.tray.showMessage(
             "PGOps", "Running in system tray.",
-            QSystemTrayIcon.MessageIcon.Information, 2000
+            QSystemTrayIcon.MessageIcon.Information, 2000,
         )
 
     def _quit(self):
         self.scheduler.stop()
         self.mdns.stop()
-
-        # Phase 2 shutdown (reverse startup order)
         self.app_procs.stop_all()
         self.caddy.stop()
         self.api_server.stop()
-        self.landing_server.stop()
+        self.landing_srv.stop()
         self.dns_server.stop()
-
         if self.minio.is_running():    self.minio.stop()
         if self.pgadmin.is_running():  self.pgadmin.stop()
         if self.manager.is_running() and not service_exists():
             self.manager.stop()
         QApplication.quit()
 
-    # ── PostgreSQL controls ───────────────────────────────────────────────────
+    # ── PostgreSQL ────────────────────────────────────────────────────────────
 
     def _start(self):
         if not self.manager.is_binaries_available():
-            self._srv_tab.show_warn(True)
-            return
+            self._srv_tab.show_warn(True); return
         self._srv_tab.btn_start.setEnabled(False)
         def fn(_p): return self.manager.start(), ""
         self._run(fn, self._on_start_done)
@@ -462,7 +450,6 @@ class MainWindow(QMainWindow):
                 self._run(_spa, lambda ok, msg: (
                     self._log(f"[pgAdmin] {msg}"), self._update_pgadmin_status()
                 ))
-            # Start Caddy + apps if not already running
             if not self.caddy.is_running():
                 QTimer.singleShot(500, self._start_caddy_and_apps)
 
@@ -471,7 +458,9 @@ class MainWindow(QMainWindow):
         if self.minio.is_running():    self.minio.stop()
         if self.pgadmin.is_running():  self.pgadmin.stop()
         def fn(_p): return self.manager.stop(), ""
-        self._run(fn, lambda ok, msg: (self._srv_tab.btn_stop.setEnabled(True), self._poll()))
+        self._run(fn, lambda ok, msg: (
+            self._srv_tab.btn_stop.setEnabled(True), self._poll()
+        ))
 
     def _download(self):
         self._srv_tab.btn_setup.setEnabled(False)
@@ -489,24 +478,107 @@ class MainWindow(QMainWindow):
         else:
             self._log(f"Setup failed: {msg}")
 
+    # ── Caddy (Phase 2) ───────────────────────────────────────────────────────
+
+    def _setup_caddy(self):
+        self._srv_tab.btn_caddy_setup.setEnabled(False)
+        self._srv_tab.set_caddy_progress(True, 0)
+        def fn(pc):
+            return setup_caddy_binary(progress_callback=pc)
+        def done(ok, msg):
+            self._srv_tab.set_caddy_progress(False)
+            self._srv_tab.btn_caddy_setup.setEnabled(True)
+            self._log(f"[Caddy] {msg}")
+            self._poll()
+        w = self._run(fn, done)
+        w.progress.connect(lambda v: self._srv_tab.set_caddy_progress(True, v))
+
+    def _start_caddy(self):
+        if not self.caddy.is_available():
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.information(
+                self, "Setup Required",
+                "Click Setup Caddy first to download the binary."
+            ); return
+        self._srv_tab.btn_caddy_start.setEnabled(False)
+        def fn(_p):
+            apps = load_apps()
+            return self.caddy.start(apps)
+        def done(ok, msg):
+            self._srv_tab.btn_caddy_start.setEnabled(True)
+            self._log(f"[Caddy] {msg}")
+            self._poll()
+        self._run(fn, done)
+
+    def _stop_caddy(self):
+        self._srv_tab.btn_caddy_stop.setEnabled(False)
+        def fn(_p): return self.caddy.stop()
+        def done(ok, msg):
+            self._srv_tab.btn_caddy_stop.setEnabled(True)
+            self._log(f"[Caddy] {msg}")
+            self._poll()
+        self._run(fn, done)
+
+    # ── FrankenPHP (Phase 2) ──────────────────────────────────────────────────
+
+    def _setup_frankenphp(self):
+        self._srv_tab.btn_fphp_setup.setEnabled(False)
+        self._srv_tab.set_fphp_progress(True, 0)
+        def fn(pc):
+            return setup_frankenphp_binary(progress_callback=pc)
+        def done(ok, msg):
+            self._srv_tab.set_fphp_progress(False)
+            self._srv_tab.btn_fphp_setup.setEnabled(True)
+            self._log(f"[FrankenPHP] {msg}")
+            self._poll()
+        w = self._run(fn, done)
+        w.progress.connect(lambda v: self._srv_tab.set_fphp_progress(True, v))
+
+    def _start_all_apps(self):
+        if not is_frankenphp_available():
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.information(
+                self, "Setup Required",
+                "Click Setup FrankenPHP first to download the binary."
+            ); return
+        apps = [a for a in load_apps() if a.get("status") == "running"]
+        if not apps:
+            self._log("[FrankenPHP] No apps marked as running in apps.json."); return
+        self._srv_tab.btn_fphp_start.setEnabled(False)
+        def fn(_p):
+            results = self.app_procs.start_all(apps)
+            return True, f"Started {len(results)} app(s)."
+        def done(ok, msg):
+            self._srv_tab.btn_fphp_start.setEnabled(True)
+            self._log(f"[FrankenPHP] {msg}")
+            self._poll()
+        self._run(fn, done)
+
+    def _stop_all_apps(self):
+        self._srv_tab.btn_fphp_stop.setEnabled(False)
+        def fn(_p):
+            self.app_procs.stop_all()
+            return True, "All app processes stopped."
+        def done(ok, msg):
+            self._srv_tab.btn_fphp_stop.setEnabled(True)
+            self._log(f"[FrankenPHP] {msg}")
+            self._poll()
+        self._run(fn, done)
+
     # ── Database operations ───────────────────────────────────────────────────
 
     def _load_databases_async(self):
-        if not self.manager.is_running():
-            return
+        if not self.manager.is_running(): return
         cfg = self.config
         def fn(_p):
             return dbm.list_databases(cfg["username"], cfg["password"], cfg["port"])
-
         def done(dbs, error):
-            if error:
-                self._log(f"DB list error: {error}"); return
+            if error: self._log(f"DB list error: {error}"); return
             if dbs is None: return
             self._db_list = dbs
             self._db_tab.populate(dbs, self.manager)
             self._backup_tab.populate_dbs([db["name"] for db in dbs])
             self._sched_tab.populate_dbs([db["name"] for db in dbs])
-
         w = _DbWorker(fn)
         w.result.connect(done)
         w.start()
@@ -544,11 +616,8 @@ class MainWindow(QMainWindow):
 
     def _change_password(self, dbname):
         from ui.tab_databases import ChangePwDialog as DbChPw
-        owner = dbname
-        for db in self._db_list:
-            if db["name"] == dbname:
-                owner = db["owner"]; break
-        dlg = DbChPw(owner, self)
+        owner = next((db["owner"] for db in self._db_list if db["name"] == dbname), dbname)
+        dlg   = DbChPw(owner, self)
         if dlg.exec() != QDialog.DialogCode.Accepted: return
         new_pw = dlg.value()
         def fn(_p):
@@ -578,8 +647,8 @@ class MainWindow(QMainWindow):
         self.manager.config    = self.config
         self.minio.config      = self.config
         self.pgadmin.pg_config = self.config
-        self.caddy.config      = self.config      # Phase 2
-        self.api_server._cfg   = self.config      # Phase 2
+        self.caddy.config      = self.config
+        self.api_server._cfg   = self.config
         self.activity.update_config(self.config)
         self._db_tab.update_config(self.config)
         self._backup_tab.update_config(self.config)
@@ -624,9 +693,7 @@ class MainWindow(QMainWindow):
         reply = QMessageBox.question(
             self, "Reset pgAdmin",
             "Stop pgAdmin, delete its database, and restart fresh?\n\n"
-            "Log in after reset with:\n"
-            "  Email:    admin@pgops.com\n"
-            "  Password: pgopsadmin",
+            "Log in after reset with:\n  Email: admin@pgops.com\n  Password: pgopsadmin",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
@@ -681,13 +748,12 @@ class MainWindow(QMainWindow):
             ip = self.manager.get_lan_ip() if self.mdns.is_running() else ""
             self._net_tab.update_mdns_status(self.mdns.is_running(), ip)
 
-    # ── Network / IP pinning ──────────────────────────────────────────────────
+    # ── IP pinning ────────────────────────────────────────────────────────────
 
     def _pin_ip(self, ip):
         self.config["preferred_ip"] = ip
         save_config(self.config)
         self.manager.config = self.config
-        # Also update DNS server with new IP
         self.dns_server.update_ip(ip)
         self._log(f"Pinned host IP: {ip}")
         self._poll()
@@ -708,18 +774,36 @@ class MainWindow(QMainWindow):
             d = self.manager.connection_details()
             cfg["_host"] = self.manager.get_lan_ip()
             cfg.update(d)
+
         self._srv_tab.update_server_status(
             running, cfg, self.manager.connection_string() if running else ""
         )
         if not self.manager.is_binaries_available():
             self._srv_tab.show_warn(True)
-        if hasattr(self, "_svc_tab"):
-            self._svc_tab.update_status()
-        self._update_mdns_status()
+
         self._update_pgadmin_status()
-        if hasattr(self, "_sched_tab"):
-            self._sched_tab.refresh_next_run()
-        # Keep DNS IP in sync with current LAN IP
+
+        # Caddy status
+        self._srv_tab.update_caddy_status(
+            running=self.caddy.is_running(),
+            available=self.caddy.is_available(),
+        )
+
+        # FrankenPHP status — count live processes
+        live_count = sum(
+            1 for app_id, proc in self.app_procs.processes.items() if proc.is_running
+        )
+        self._srv_tab.update_frankenphp_status(
+            running_count=live_count,
+            available=is_frankenphp_available(),
+        )
+
+        if hasattr(self, "_svc_tab"):  self._svc_tab.update_status()
+        if hasattr(self, "_sched_tab"): self._sched_tab.refresh_next_run()
+
+        self._update_mdns_status()
+
+        # Keep DNS IP in sync
         current_ip = self.manager.get_lan_ip()
         if self.dns_server.host_ip != current_ip:
             self.dns_server.update_ip(current_ip)

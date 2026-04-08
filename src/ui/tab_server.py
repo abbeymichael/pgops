@@ -1,3 +1,10 @@
+"""
+tab_server.py  — Phase 2 edition
+Adds Caddy and FrankenPHP infrastructure cards below the pgAdmin card.
+Each follows the exact same layout pattern as the pgAdmin card:
+  status badge | URL/info row | action buttons | optional warning note.
+"""
+
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QProgressBar, QScrollArea, QFrame, QTextEdit, QSizePolicy, QApplication,
@@ -17,24 +24,44 @@ def _card(parent=None):
 
 
 class ServerTab(QWidget):
-    def __init__(self, manager, config, minio, pgadmin,
-                 on_start, on_stop, on_download,
-                 on_start_pgadmin, on_stop_pgadmin, on_open_pgadmin, on_reset_pgadmin,
-                 log_fn, parent=None):
+    def __init__(
+        self,
+        manager, config, minio, pgadmin,
+        on_start, on_stop, on_download,
+        on_start_pgadmin, on_stop_pgadmin, on_open_pgadmin, on_reset_pgadmin,
+        # Phase 2 callbacks
+        on_setup_caddy, on_start_caddy, on_stop_caddy,
+        on_setup_frankenphp, on_start_frankenphp, on_stop_frankenphp,
+        caddy_manager, frankenphp_manager,
+        log_fn, parent=None,
+    ):
         super().__init__(parent)
-        self._manager = manager
-        self._config = config
-        self._minio = minio
-        self._pgadmin = pgadmin
-        self._log = log_fn
-        self._cb_start = on_start
-        self._cb_stop = on_stop
-        self._cb_dl = on_download
-        self._cb_pga_start = on_start_pgadmin
-        self._cb_pga_stop = on_stop_pgadmin
-        self._cb_pga_open = on_open_pgadmin
-        self._cb_pga_reset = on_reset_pgadmin
+        self._manager    = manager
+        self._config     = config
+        self._minio      = minio
+        self._pgadmin    = pgadmin
+        self._caddy      = caddy_manager
+        self._frankenphp = frankenphp_manager
+        self._log        = log_fn
+
+        # Callbacks
+        self._cb_start         = on_start
+        self._cb_stop          = on_stop
+        self._cb_dl            = on_download
+        self._cb_pga_start     = on_start_pgadmin
+        self._cb_pga_stop      = on_stop_pgadmin
+        self._cb_pga_open      = on_open_pgadmin
+        self._cb_pga_reset     = on_reset_pgadmin
+        self._cb_caddy_setup   = on_setup_caddy
+        self._cb_caddy_start   = on_start_caddy
+        self._cb_caddy_stop    = on_stop_caddy
+        self._cb_fphp_setup    = on_setup_frankenphp
+        self._cb_fphp_start    = on_start_frankenphp
+        self._cb_fphp_stop     = on_stop_frankenphp
+
         self._build()
+
+    # ── Build ─────────────────────────────────────────────────────────────────
 
     def _build(self):
         root = QVBoxLayout(self)
@@ -64,26 +91,38 @@ class ServerTab(QWidget):
         scroll.setStyleSheet("background:transparent;border:none;")
 
         body = QWidget()
-        body.setStyleSheet(f"background:#1a1d23;")
+        body.setStyleSheet("background:#1a1d23;")
         bv = QVBoxLayout(body)
         bv.setContentsMargins(28, 24, 28, 28)
         bv.setSpacing(18)
 
+        # Row 1 – controls + connection details
         cols = QHBoxLayout()
         cols.setSpacing(18)
         cols.addWidget(self._controls_card(), 4)
         cols.addWidget(self._connection_card(), 6)
         bv.addLayout(cols)
 
+        # Row 2 – chart + logs
         row2 = QHBoxLayout()
         row2.setSpacing(18)
         row2.addWidget(self._load_card(), 5)
         row2.addWidget(self._logs_card(), 5)
         bv.addLayout(row2)
 
+        # Row 3 – pgAdmin (unchanged)
         bv.addWidget(self._pgadmin_card())
+
+        # Row 4 – Caddy (Phase 2)
+        bv.addWidget(self._caddy_card())
+
+        # Row 5 – FrankenPHP (Phase 2)
+        bv.addWidget(self._frankenphp_card())
+
         scroll.setWidget(body)
         root.addWidget(scroll)
+
+    # ── Page header ───────────────────────────────────────────────────────────
 
     def _page_header(self):
         w = QWidget()
@@ -97,15 +136,32 @@ class ServerTab(QWidget):
 
         title_row = QHBoxLayout()
         title_row.setSpacing(12)
+        self._title = QLabel("Main Cluster")
+        self._title.setStyleSheet(
+            f"color:{C_TEXT};font-size:24px;font-weight:800;background:transparent;"
+        )
+        prod = QLabel("PRODUCTION")
+        prod.setStyleSheet(
+            f"color:{C_TEXT3};background:{C_SURFACE};border:1px solid {C_BORDER2};"
+            f"border-radius:4px;font-size:9px;font-weight:800;"
+            f"letter-spacing:1.5px;padding:3px 8px;"
+        )
+        title_row.addWidget(self._title)
+        title_row.addWidget(prod)
         title_row.addStretch()
+        col.addLayout(title_row)
 
         sub_row = QHBoxLayout()
         sub_row.setSpacing(6)
-        self._dot = PulseDot(C_TEXT3)
+        self._dot       = PulseDot(C_TEXT3)
         self._state_lbl = QLabel("Stopped")
-        self._state_lbl.setStyleSheet(f"color:{C_TEXT3};font-size:12px;background:transparent;")
+        self._state_lbl.setStyleSheet(
+            f"color:{C_TEXT3};font-size:12px;background:transparent;"
+        )
         self._uptime_lbl = QLabel("")
-        self._uptime_lbl.setStyleSheet(f"color:{C_TEXT3};font-size:12px;background:transparent;")
+        self._uptime_lbl.setStyleSheet(
+            f"color:{C_TEXT3};font-size:12px;background:transparent;"
+        )
         sub_row.addWidget(self._dot)
         sub_row.addWidget(self._state_lbl)
         sub_row.addWidget(self._uptime_lbl)
@@ -115,8 +171,12 @@ class ServerTab(QWidget):
         h.addLayout(col)
         h.addStretch()
 
-        svc = QLabel("")
-      
+        svc = QLabel("⊙  SYSTEM TRAY ACTIVE")
+        svc.setStyleSheet(
+            f"color:{C_TEXT3};font-size:9px;font-weight:700;letter-spacing:1.5px;"
+            f"background:{C_SURFACE};border:1px solid {C_BORDER2};"
+            f"border-radius:5px;padding:5px 12px;"
+        )
         h.addWidget(svc)
         return w
 
@@ -129,7 +189,7 @@ class ServerTab(QWidget):
         h.setSpacing(12)
         icon = QLabel("⚠")
         icon.setStyleSheet(f"color:{C_AMBER};font-size:14px;background:transparent;")
-        msg = QLabel("PostgreSQL binaries not found. Click Setup to download them.")
+        msg  = QLabel("PostgreSQL binaries not found. Click Setup to download them.")
         msg.setStyleSheet(f"color:#fbbf24;font-size:12px;background:transparent;")
         h.addWidget(icon)
         h.addWidget(msg)
@@ -146,6 +206,8 @@ class ServerTab(QWidget):
         h.addWidget(self._btn_dl)
         return w
 
+    # ── Controls card ─────────────────────────────────────────────────────────
+
     def _controls_card(self):
         card = _card()
         v = QVBoxLayout(card)
@@ -153,7 +215,9 @@ class ServerTab(QWidget):
         v.setSpacing(14)
 
         t = QLabel("Server Controls")
-        t.setStyleSheet(f"color:{C_TEXT};font-size:15px;font-weight:700;background:transparent;")
+        t.setStyleSheet(
+            f"color:{C_TEXT};font-size:15px;font-weight:700;background:transparent;"
+        )
         sub = QLabel("Execute direct orchestration commands.")
         sub.setStyleSheet(f"color:{C_TEXT3};font-size:12px;background:transparent;")
         v.addWidget(t)
@@ -188,7 +252,8 @@ class ServerTab(QWidget):
         self.btn_setup.setFixedHeight(44)
         self.btn_setup.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_setup.setStyleSheet(
-            f"QPushButton{{background:{C_SURFACE2};color:{C_TEXT2};border:1px solid {C_BORDER2};"
+            f"QPushButton{{background:{C_SURFACE2};color:{C_TEXT2};"
+            f"border:1px solid {C_BORDER2};"
             f"border-radius:8px;font-size:13px;font-weight:600;}}"
             f"QPushButton:hover{{background:{C_BORDER2};color:{C_TEXT};}}"
         )
@@ -196,6 +261,8 @@ class ServerTab(QWidget):
         v.addWidget(self.btn_setup)
         v.addStretch()
         return card
+
+    # ── Connection card ───────────────────────────────────────────────────────
 
     def _connection_card(self):
         card = _card()
@@ -207,22 +274,15 @@ class ServerTab(QWidget):
         col = QVBoxLayout()
         col.setSpacing(3)
         t = QLabel("Connection Details")
-        t.setStyleSheet(f"color:{C_TEXT};font-size:15px;font-weight:700;background:transparent;")
+        t.setStyleSheet(
+            f"color:{C_TEXT};font-size:15px;font-weight:700;background:transparent;"
+        )
         sub = QLabel("Credentials and parameters for the main instance.")
         sub.setStyleSheet(f"color:{C_TEXT3};font-size:12px;background:transparent;")
         col.addWidget(t)
         col.addWidget(sub)
-        edit_btn = QPushButton("✎")
-        edit_btn.setFixedSize(32, 32)
-        edit_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        edit_btn.setStyleSheet(
-            f"QPushButton{{background:{C_SURFACE2};color:{C_TEXT2};"
-            f"border:1px solid {C_BORDER};border-radius:7px;font-size:14px;}}"
-            f"QPushButton:hover{{background:{C_BORDER2};color:{C_TEXT};}}"
-        )
         hdr.addLayout(col)
         hdr.addStretch()
-        hdr.addWidget(edit_btn)
         v.addLayout(hdr)
 
         row1 = QHBoxLayout()
@@ -280,6 +340,8 @@ class ServerTab(QWidget):
         v.addLayout(uri_row)
         return card
 
+    # ── Load card ─────────────────────────────────────────────────────────────
+
     def _load_card(self):
         card = _card()
         v = QVBoxLayout(card)
@@ -305,17 +367,18 @@ class ServerTab(QWidget):
         random.seed(7)
         vals = [random.randint(25, 90) for _ in range(14)]
         peak = max(vals)
-        for i, val in enumerate(vals):
+        for val in vals:
             bar = QFrame()
             bar.setFixedWidth(18)
-            h_px = max(8, int(val / 100 * 90))
-            bar.setFixedHeight(h_px)
+            bar.setFixedHeight(max(8, int(val / 100 * 90)))
             color = C_BLUE if val == peak else f"{C_BLUE}50"
             bar.setStyleSheet(f"background:{color};border-radius:3px 3px 0 0;")
             ch.addWidget(bar)
         ch.addStretch()
         v.addWidget(chart)
         return card
+
+    # ── Logs card ─────────────────────────────────────────────────────────────
 
     def _logs_card(self):
         card = _card()
@@ -348,17 +411,9 @@ class ServerTab(QWidget):
         )
         self._log_box.setPlaceholderText("Waiting for server...")
         v.addWidget(self._log_box)
-
-        view_all = QPushButton("View All Logs →")
-        view_all.setFixedHeight(26)
-        view_all.setCursor(Qt.CursorShape.PointingHandCursor)
-        view_all.setStyleSheet(
-            f"QPushButton{{background:transparent;color:{C_TEXT3};"
-            f"border:none;font-size:11px;text-align:left;}}"
-            f"QPushButton:hover{{color:{C_TEXT2};}}"
-        )
-        v.addWidget(view_all)
         return card
+
+    # ── pgAdmin card (unchanged logic, kept intact) ───────────────────────────
 
     def _pgadmin_card(self):
         card = _card()
@@ -368,7 +423,9 @@ class ServerTab(QWidget):
 
         hdr = QHBoxLayout()
         t = QLabel("pgAdmin 4 — Database Web UI")
-        t.setStyleSheet(f"color:{C_TEXT};font-size:14px;font-weight:700;background:transparent;")
+        t.setStyleSheet(
+            f"color:{C_TEXT};font-size:14px;font-weight:700;background:transparent;"
+        )
         self._pga_badge = QLabel("● STOPPED")
         self._pga_badge.setStyleSheet(
             f"color:{C_RED};background:#2a0d0d;border:1px solid {C_RED}40;"
@@ -382,7 +439,9 @@ class ServerTab(QWidget):
 
         info = QHBoxLayout()
         url_key = QLabel("URL")
-        url_key.setStyleSheet(f"color:{C_TEXT3};font-size:11px;background:transparent;")
+        url_key.setStyleSheet(
+            f"color:{C_TEXT3};font-size:11px;background:transparent;"
+        )
         self._pga_url = QLabel("http://pgops.local:5050")
         self._pga_url.setStyleSheet(
             f"color:{C_BLUE};font-family:'Consolas','Courier New',monospace;"
@@ -404,7 +463,7 @@ class ServerTab(QWidget):
         btns = QHBoxLayout()
         btns.setSpacing(8)
 
-        def _make(text, bg, hover, fg="white"):
+        def _mk(text, bg, hover, fg="white"):
             b = QPushButton(text)
             b.setFixedHeight(32)
             b.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -415,10 +474,10 @@ class ServerTab(QWidget):
             )
             return b
 
-        self.btn_pga_start = _make("Start pgAdmin", "#166534", "#15803d", "#86efac")
-        self.btn_pga_stop  = _make("Stop",          "#7f1d1d", "#991b1b", "#fca5a5")
-        self.btn_pga_open  = _make("Open in Browser →", C_BLUE, "#3b7de8")
-        self.btn_pga_reset = _make("Reset & Restart", "#78350f", "#92400e", "#fef3c7")
+        self.btn_pga_start = _mk("Start pgAdmin",     "#166534", "#15803d", "#86efac")
+        self.btn_pga_stop  = _mk("Stop",               "#7f1d1d", "#991b1b", "#fca5a5")
+        self.btn_pga_open  = _mk("Open in Browser →",  C_BLUE,    "#3b7de8")
+        self.btn_pga_reset = _mk("Reset & Restart",    "#78350f", "#92400e", "#fef3c7")
 
         self.btn_pga_start.clicked.connect(self._cb_pga_start)
         self.btn_pga_stop.clicked.connect(self._cb_pga_stop)
@@ -431,24 +490,230 @@ class ServerTab(QWidget):
         v.addLayout(btns)
 
         if not self._pgadmin.is_available():
-            note = QLabel("pgAdmin 4 not found in the PostgreSQL bundle — run Setup PostgreSQL first.")
+            note = QLabel(
+                "pgAdmin 4 not found in the PostgreSQL bundle — run Setup PostgreSQL first."
+            )
+            note.setWordWrap(True)
             note.setStyleSheet(
                 f"background:#2a1e0a;color:#fbbf24;padding:8px 12px;"
                 f"border-radius:6px;font-size:11px;"
             )
-            note.setWordWrap(True)
             v.addWidget(note)
 
         return card
+
+    # ── Caddy card ────────────────────────────────────────────────────────────
+
+    def _caddy_card(self):
+        """Reverse proxy control card — mirrors pgAdmin card layout."""
+        card = _card()
+        v = QVBoxLayout(card)
+        v.setContentsMargins(22, 18, 22, 18)
+        v.setSpacing(12)
+
+        # Header row
+        hdr = QHBoxLayout()
+        t = QLabel("Caddy — Reverse Proxy")
+        t.setStyleSheet(
+            f"color:{C_TEXT};font-size:14px;font-weight:700;background:transparent;"
+        )
+        self._caddy_badge = QLabel("● STOPPED")
+        self._caddy_badge.setStyleSheet(
+            f"color:{C_RED};background:#2a0d0d;border:1px solid {C_RED}40;"
+            f"border-radius:4px;font-size:10px;font-weight:800;"
+            f"letter-spacing:1px;padding:3px 10px;"
+        )
+        hdr.addWidget(t)
+        hdr.addStretch()
+        hdr.addWidget(self._caddy_badge)
+        v.addLayout(hdr)
+
+        # Info row
+        info = QHBoxLayout()
+        info.setSpacing(20)
+        info_lbl = QLabel(
+            "Routes  *.pgops.local → app servers  ·  Listens on port 80"
+        )
+        info_lbl.setStyleSheet(
+            f"color:{C_TEXT3};font-family:'Consolas','Courier New',monospace;"
+            f"font-size:11px;background:transparent;"
+        )
+        info.addWidget(info_lbl)
+        info.addStretch()
+        v.addLayout(info)
+
+        # Progress bar (for setup download)
+        self._caddy_prog = QProgressBar()
+        self._caddy_prog.setVisible(False)
+        self._caddy_prog.setFixedHeight(3)
+        self._caddy_prog.setTextVisible(False)
+        self._caddy_prog.setStyleSheet(
+            f"QProgressBar{{background:{C_BORDER};border:none;}}"
+            f"QProgressBar::chunk{{background:{C_BLUE};}}"
+        )
+        v.addWidget(self._caddy_prog)
+
+        # Button row
+        btns = QHBoxLayout()
+        btns.setSpacing(8)
+
+        def _mk(text, bg, hover, fg="white"):
+            b = QPushButton(text)
+            b.setFixedHeight(32)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setStyleSheet(
+                f"QPushButton{{background:{bg};color:{fg};border:none;"
+                f"border-radius:6px;font-size:12px;font-weight:600;padding:0 14px;}}"
+                f"QPushButton:hover{{background:{hover};}}"
+                f"QPushButton:disabled{{background:{C_BORDER};color:{C_TEXT3};}}"
+            )
+            return b
+
+        self.btn_caddy_setup  = _mk("Setup Caddy",  "#78350f", "#92400e", "#fef3c7")
+        self.btn_caddy_start  = _mk("Start Caddy",  "#166534", "#15803d", "#86efac")
+        self.btn_caddy_stop   = _mk("Stop",          "#7f1d1d", "#991b1b", "#fca5a5")
+
+        self.btn_caddy_setup.clicked.connect(self._cb_caddy_setup)
+        self.btn_caddy_start.clicked.connect(self._cb_caddy_start)
+        self.btn_caddy_stop.clicked.connect(self._cb_caddy_stop)
+
+        for b in (self.btn_caddy_setup, self.btn_caddy_start, self.btn_caddy_stop):
+            btns.addWidget(b)
+        btns.addStretch()
+        v.addLayout(btns)
+
+        # Not-available note
+        if not self._caddy.is_available():
+            self._caddy_note = QLabel(
+                "Caddy binary not found. Click Setup Caddy to download it (~30 MB)."
+            )
+            self._caddy_note.setWordWrap(True)
+            self._caddy_note.setStyleSheet(
+                f"background:#2a1e0a;color:#fbbf24;padding:8px 12px;"
+                f"border-radius:6px;font-size:11px;"
+            )
+            v.addWidget(self._caddy_note)
+        else:
+            self._caddy_note = None
+
+        return card
+
+    # ── FrankenPHP card ───────────────────────────────────────────────────────
+
+    def _frankenphp_card(self):
+        """PHP app server control card — mirrors pgAdmin/Caddy card layout."""
+        card = _card()
+        v = QVBoxLayout(card)
+        v.setContentsMargins(22, 18, 22, 18)
+        v.setSpacing(12)
+
+        # Header row
+        hdr = QHBoxLayout()
+        t = QLabel("FrankenPHP — PHP App Server")
+        t.setStyleSheet(
+            f"color:{C_TEXT};font-size:14px;font-weight:700;background:transparent;"
+        )
+        self._fphp_badge = QLabel("● STOPPED")
+        self._fphp_badge.setStyleSheet(
+            f"color:{C_RED};background:#2a0d0d;border:1px solid {C_RED}40;"
+            f"border-radius:4px;font-size:10px;font-weight:800;"
+            f"letter-spacing:1px;padding:3px 10px;"
+        )
+        hdr.addWidget(t)
+        hdr.addStretch()
+        hdr.addWidget(self._fphp_badge)
+        v.addLayout(hdr)
+
+        # Info row
+        info = QHBoxLayout()
+        self._fphp_info = QLabel(
+            "Serves Laravel apps on internal ports  ·  One process per app"
+        )
+        self._fphp_info.setStyleSheet(
+            f"color:{C_TEXT3};font-family:'Consolas','Courier New',monospace;"
+            f"font-size:11px;background:transparent;"
+        )
+        info.addWidget(self._fphp_info)
+        info.addStretch()
+        v.addLayout(info)
+
+        # Progress bar (for setup download)
+        self._fphp_prog = QProgressBar()
+        self._fphp_prog.setVisible(False)
+        self._fphp_prog.setFixedHeight(3)
+        self._fphp_prog.setTextVisible(False)
+        self._fphp_prog.setStyleSheet(
+            f"QProgressBar{{background:{C_BORDER};border:none;}}"
+            f"QProgressBar::chunk{{background:{C_BLUE};}}"
+        )
+        v.addWidget(self._fphp_prog)
+
+        # Button row
+        btns = QHBoxLayout()
+        btns.setSpacing(8)
+
+        def _mk(text, bg, hover, fg="white"):
+            b = QPushButton(text)
+            b.setFixedHeight(32)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setStyleSheet(
+                f"QPushButton{{background:{bg};color:{fg};border:none;"
+                f"border-radius:6px;font-size:12px;font-weight:600;padding:0 14px;}}"
+                f"QPushButton:hover{{background:{hover};}}"
+                f"QPushButton:disabled{{background:{C_BORDER};color:{C_TEXT3};}}"
+            )
+            return b
+
+        self.btn_fphp_setup   = _mk("Setup FrankenPHP", "#78350f", "#92400e", "#fef3c7")
+        self.btn_fphp_start   = _mk("Start All Apps",   "#166534", "#15803d", "#86efac")
+        self.btn_fphp_stop    = _mk("Stop All Apps",    "#7f1d1d", "#991b1b", "#fca5a5")
+
+        self.btn_fphp_setup.clicked.connect(self._cb_fphp_setup)
+        self.btn_fphp_start.clicked.connect(self._cb_fphp_start)
+        self.btn_fphp_stop.clicked.connect(self._cb_fphp_stop)
+
+        for b in (self.btn_fphp_setup, self.btn_fphp_start, self.btn_fphp_stop):
+            btns.addWidget(b)
+        btns.addStretch()
+        v.addLayout(btns)
+
+        platform_note = QLabel(
+            "Windows: downloaded as a ZIP archive (frankenphp.exe + PHP DLLs).  "
+            "macOS: single self-contained binary."
+        )
+        platform_note.setWordWrap(True)
+        platform_note.setStyleSheet(
+            f"color:{C_TEXT3};font-size:11px;background:transparent;"
+        )
+        v.addWidget(platform_note)
+
+        # Not-available note
+        if not self._frankenphp.is_binary_available():
+            self._fphp_note = QLabel(
+                "FrankenPHP not found. Click Setup FrankenPHP to download it (~150 MB)."
+            )
+            self._fphp_note.setWordWrap(True)
+            self._fphp_note.setStyleSheet(
+                f"background:#2a1e0a;color:#fbbf24;padding:8px 12px;"
+                f"border-radius:6px;font-size:11px;"
+            )
+            v.addWidget(self._fphp_note)
+        else:
+            self._fphp_note = None
+
+        return card
+
+    # ── Public update methods (called by main_window._poll) ───────────────────
 
     def update_server_status(self, running, config, conn_str):
         self._config = config
         if running:
             self._dot.set_color(C_GREEN)
             self._state_lbl.setText("Running")
-            self._state_lbl.setStyleSheet(f"color:{C_GREEN};font-size:12px;background:transparent;")
-            host = config.get("_host", "-")
-            self._f_host.set_value(host)
+            self._state_lbl.setStyleSheet(
+                f"color:{C_GREEN};font-size:12px;background:transparent;"
+            )
+            self._f_host.set_value(config.get("_host", "-"))
             self._f_port.set_value(str(config.get("port", 5432)))
             self._f_user.set_value(config.get("username", ""))
             self._f_pass.set_value(config.get("password", ""))
@@ -463,26 +728,88 @@ class ServerTab(QWidget):
         else:
             self._dot.set_color(C_TEXT3)
             self._state_lbl.setText("Stopped")
-            self._state_lbl.setStyleSheet(f"color:{C_TEXT3};font-size:12px;background:transparent;")
+            self._state_lbl.setStyleSheet(
+                f"color:{C_TEXT3};font-size:12px;background:transparent;"
+            )
 
     def update_pgadmin_status(self, running, available):
         if not available:
             self._pga_badge.setText("NOT AVAILABLE")
             self._pga_badge.setStyleSheet(
                 f"color:{C_TEXT3};background:{C_SURFACE2};border:1px solid {C_BORDER};"
-                f"border-radius:4px;font-size:10px;font-weight:800;letter-spacing:1px;padding:3px 10px;"
+                f"border-radius:4px;font-size:10px;font-weight:800;"
+                f"letter-spacing:1px;padding:3px 10px;"
             )
         elif running:
             self._pga_badge.setText("● RUNNING")
             self._pga_badge.setStyleSheet(
                 f"color:{C_GREEN};background:#0a2016;border:1px solid {C_GREEN}40;"
-                f"border-radius:4px;font-size:10px;font-weight:800;letter-spacing:1px;padding:3px 10px;"
+                f"border-radius:4px;font-size:10px;font-weight:800;"
+                f"letter-spacing:1px;padding:3px 10px;"
             )
         else:
             self._pga_badge.setText("● STOPPED")
             self._pga_badge.setStyleSheet(
                 f"color:{C_RED};background:#2a0d0d;border:1px solid {C_RED}40;"
-                f"border-radius:4px;font-size:10px;font-weight:800;letter-spacing:1px;padding:3px 10px;"
+                f"border-radius:4px;font-size:10px;font-weight:800;"
+                f"letter-spacing:1px;padding:3px 10px;"
+            )
+
+    def update_caddy_status(self, running: bool, available: bool):
+        if not available:
+            self._caddy_badge.setText("NOT INSTALLED")
+            self._caddy_badge.setStyleSheet(
+                f"color:{C_TEXT3};background:{C_SURFACE2};border:1px solid {C_BORDER};"
+                f"border-radius:4px;font-size:10px;font-weight:800;"
+                f"letter-spacing:1px;padding:3px 10px;"
+            )
+        elif running:
+            self._caddy_badge.setText("● RUNNING")
+            self._caddy_badge.setStyleSheet(
+                f"color:{C_GREEN};background:#0a2016;border:1px solid {C_GREEN}40;"
+                f"border-radius:4px;font-size:10px;font-weight:800;"
+                f"letter-spacing:1px;padding:3px 10px;"
+            )
+            if self._caddy_note:
+                self._caddy_note.setVisible(False)
+        else:
+            self._caddy_badge.setText("● STOPPED")
+            self._caddy_badge.setStyleSheet(
+                f"color:{C_RED};background:#2a0d0d;border:1px solid {C_RED}40;"
+                f"border-radius:4px;font-size:10px;font-weight:800;"
+                f"letter-spacing:1px;padding:3px 10px;"
+            )
+
+    def update_frankenphp_status(self, running_count: int, available: bool):
+        """
+        running_count: number of app processes currently alive.
+        available:     whether the binary exists.
+        """
+        if not available:
+            self._fphp_badge.setText("NOT INSTALLED")
+            self._fphp_badge.setStyleSheet(
+                f"color:{C_TEXT3};background:{C_SURFACE2};border:1px solid {C_BORDER};"
+                f"border-radius:4px;font-size:10px;font-weight:800;"
+                f"letter-spacing:1px;padding:3px 10px;"
+            )
+        elif running_count > 0:
+            self._fphp_badge.setText(f"● {running_count} RUNNING")
+            self._fphp_badge.setStyleSheet(
+                f"color:{C_GREEN};background:#0a2016;border:1px solid {C_GREEN}40;"
+                f"border-radius:4px;font-size:10px;font-weight:800;"
+                f"letter-spacing:1px;padding:3px 10px;"
+            )
+            if self._fphp_note:
+                self._fphp_note.setVisible(False)
+            self._fphp_info.setText(
+                f"Serving {running_count} app(s) on internal ports  ·  One process per app"
+            )
+        else:
+            self._fphp_badge.setText("● STOPPED")
+            self._fphp_badge.setStyleSheet(
+                f"color:{C_RED};background:#2a0d0d;border:1px solid {C_RED}40;"
+                f"border-radius:4px;font-size:10px;font-weight:800;"
+                f"letter-spacing:1px;padding:3px 10px;"
             )
 
     def show_warn(self, visible):
@@ -493,6 +820,18 @@ class ServerTab(QWidget):
         if visible:
             self._prog.setValue(val)
 
+    def set_caddy_progress(self, visible: bool, val: int = 0):
+        self._caddy_prog.setVisible(visible)
+        if visible:
+            self._caddy_prog.setValue(val)
+
+    def set_fphp_progress(self, visible: bool, val: int = 0):
+        self._fphp_prog.setVisible(visible)
+        if visible:
+            self._fphp_prog.setValue(val)
+
     def append_log(self, msg):
         self._log_box.append(str(msg))
-        self._log_box.verticalScrollBar().setValue(self._log_box.verticalScrollBar().maximum())
+        self._log_box.verticalScrollBar().setValue(
+            self._log_box.verticalScrollBar().maximum()
+        )
