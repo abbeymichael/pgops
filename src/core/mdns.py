@@ -1,7 +1,7 @@
 """
 mdns.py
-Broadcasts this machine as 'pgops.local' on the LAN using mDNS (Zeroconf).
-Any device on the same network resolves pgops.local to the current host IP.
+Broadcasts this machine as 'pgops.test' on the LAN using mDNS (Zeroconf).
+Any device on the same network resolves pgops.test to the current host IP.
 No DNS server, no router config — works on LAN and Windows hotspot automatically.
 """
 
@@ -17,14 +17,14 @@ logging.getLogger("zeroconf").setLevel(logging.ERROR)
 
 class MDNSBroadcaster:
     """
-    Registers this machine as 'pgops.local' on the local network.
+    Registers this machine as 'pgops.test' on the local network.
     Also registers a PostgreSQL service record so tools like pgAdmin
     can discover the server automatically via service browsing.
     """
 
     SERVICE_TYPE = "_postgresql._tcp.local."
     SERVICE_NAME = "PGOps._postgresql._tcp.local."
-    HOSTNAME     = "pgops"           # resolves as pgops.local
+    HOSTNAME     = "pgops"           # resolves as pgops.test
 
     def __init__(self, port: int = 5432, log_fn=None):
         self.port    = port
@@ -36,7 +36,7 @@ class MDNSBroadcaster:
     # ── Public API ────────────────────────────────────────────────────────────
 
     def start(self) -> tuple[bool, str]:
-        """Start broadcasting pgops.local. Returns (ok, message)."""
+        """Start broadcasting pgops.test. Returns (ok, message)."""
         if self._running:
             return True, "mDNS already running."
         try:
@@ -62,8 +62,8 @@ class MDNSBroadcaster:
             self._zc = Zeroconf()
             self._zc.register_service(self._info)
             self._running = True
-            self._log(f"[mDNS] Broadcasting as pgops.local → {ip}:{self.port}")
-            return True, f"pgops.local is active → {ip}"
+            self._log(f"[mDNS] Broadcasting as pgops.test → {ip}:{self.port}")
+            return True, f"pgops.test is active → {ip}"
 
         except ImportError:
             return False, (
@@ -119,9 +119,9 @@ class MDNSBroadcaster:
                 return "127.0.0.1"
 
 
-def verify_mdns_resolution(hostname: str = "pgops.local", timeout: float = 3.0) -> tuple[bool, str]:
+def verify_mdns_resolution(hostname: str = "pgops.test", timeout: float = 3.0) -> tuple[bool, str]:
     """
-    Try to resolve pgops.local from this machine.
+    Try to resolve pgops.test from this machine.
     Useful for testing that mDNS is working.
     """
     try:
@@ -133,24 +133,24 @@ def verify_mdns_resolution(hostname: str = "pgops.local", timeout: float = 3.0) 
 
 def get_mdns_instructions() -> dict:
     """
-    Returns per-OS instructions for connecting to pgops.local.
+    Returns per-OS instructions for connecting to pgops.test.
     """
     return {
         "Windows": (
             "Windows 10/11 supports mDNS natively.\n"
-            "Connect using:  pgops.local  as the host.\n\n"
+            "Connect using:  pgops.test  as the host.\n\n"
             "If it doesn't resolve, install Bonjour:\n"
             "https://support.apple.com/kb/DL999"
         ),
         "macOS": (
             "macOS supports mDNS natively — no setup needed.\n"
-            "Connect using:  pgops.local  as the host."
+            "Connect using:  pgops.test  as the host."
         ),
         "Linux": (
             "Install avahi-daemon:\n"
             "  sudo apt install avahi-daemon   (Ubuntu/Debian)\n"
             "  sudo dnf install avahi          (Fedora)\n"
-            "Then connect using:  pgops.local"
+            "Then connect using:  pgops.test"
         ),
         "Android": (
             "Most Android apps resolve .local hostnames automatically.\n"
@@ -158,6 +158,6 @@ def get_mdns_instructions() -> dict:
         ),
         "iOS": (
             "iOS supports mDNS natively.\n"
-            "Connect using:  pgops.local  as the host."
+            "Connect using:  pgops.test  as the host."
         ),
     }

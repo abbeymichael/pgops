@@ -35,7 +35,7 @@ No cloud subscription. No internet dependency. No IT department required.
 14. [Service Tab — Windows Service Mode](#14-service-tab--windows-service-mode)
 15. [Settings Tab](#15-settings-tab)
 16. [Network Tab](#16-network-tab)
-17. [Local Domain — pgops.local](#17-local-domain--pgopslocal)
+17. [Local Domain — pgops.test](#17-local-domain--pgopslocal)
 18. [Connecting Laravel Applications](#18-connecting-laravel-applications)
 19. [Connecting Other Frameworks](#19-connecting-other-frameworks)
 20. [Data Locations](#20-data-locations)
@@ -54,7 +54,7 @@ on the same network:
 - **MinIO** — S3-compatible object storage server (port 9000, console port 9001)
 
 Both are bundled as portable binaries. Neither requires a separate installation.
-Both are accessible via the hostname `pgops.local` which PGOps broadcasts
+Both are accessible via the hostname `pgops.test` which PGOps broadcasts
 automatically using mDNS — so connected apps never need a hardcoded IP address.
 
 ### Who it is for
@@ -87,7 +87,7 @@ and internet connectivity cannot be guaranteed.
 
 - Any device on the same LAN or connected to the PGOps hotspot
 - No software installation required on clients
-- mDNS support required for `pgops.local` hostname resolution (see Section 17)
+- mDNS support required for `pgops.test` hostname resolution (see Section 17)
 
 ---
 
@@ -134,7 +134,7 @@ Click **Start Server** on the Server tab. PGOps will:
 - Configure it to listen on all network interfaces
 - Configure `pg_hba.conf` to allow LAN connections
 - Create the default database
-- Start broadcasting `pgops.local` on the network
+- Start broadcasting `pgops.test` on the network
 
 ### Step 4 — Connect your apps
 
@@ -404,7 +404,7 @@ the download entirely.
 ### Web Console
 
 Click **Open Web Console** to open the MinIO admin interface in your browser at
-`http://pgops.local:9001`. Log in with the admin username and password from Settings
+`http://pgops.test:9001`. Log in with the admin username and password from Settings
 (default: `postgres` / `postgres`).
 
 ### Creating a bucket
@@ -468,7 +468,7 @@ AWS_ACCESS_KEY_ID=your_access_key
 AWS_SECRET_ACCESS_KEY=your_secret_key
 AWS_DEFAULT_REGION=us-east-1
 AWS_BUCKET=your-bucket-name
-AWS_ENDPOINT=http://pgops.local:9000
+AWS_ENDPOINT=http://pgops.test:9000
 AWS_USE_PATH_STYLE_ENDPOINT=true
 ```
 
@@ -528,7 +528,7 @@ Click **Generate New Certificate**. PGOps uses the `cryptography` Python library
 to create a self-signed RSA 2048-bit certificate valid for 10 years. The certificate
 covers:
 
-- `pgops.local`
+- `pgops.test`
 - `localhost`
 - `pgops`
 - `127.0.0.1`
@@ -583,7 +583,7 @@ psycopg2.connect(..., sslmode='require')
 
 **Connection URL:**
 ```
-postgresql://user:pass@pgops.local:5432/dbname?sslmode=require
+postgresql://user:pass@pgops.test:5432/dbname?sslmode=require
 ```
 
 ---
@@ -717,11 +717,11 @@ A Copy button is provided.
 
 ---
 
-## 17. Local Domain — pgops.local
+## 17. Local Domain — pgops.test
 
-PGOps broadcasts `pgops.local` on the network using mDNS (Multicast DNS, also known
+PGOps broadcasts `pgops.test` on the network using mDNS (Multicast DNS, also known
 as Zeroconf or Bonjour). This means any device on the same LAN or hotspot can resolve
-`pgops.local` to the host machine's current IP address — automatically, without any
+`pgops.test` to the host machine's current IP address — automatically, without any
 DNS server or manual configuration.
 
 ### Why this matters
@@ -729,10 +729,10 @@ DNS server or manual configuration.
 Without mDNS, your apps must use an IP address as the database host. If that IP
 changes (DHCP lease renewal, network change, different router), all apps break.
 
-With `pgops.local`, the hostname never changes. Your apps use:
+With `pgops.test`, the hostname never changes. Your apps use:
 
 ```
-host = pgops.local
+host = pgops.test
 ```
 
 ...and it always works, regardless of what IP the host machine currently has.
@@ -757,16 +757,16 @@ host = pgops.local
 
 ### Testing resolution
 
-Click **Test Resolution** in the Network tab to verify that `pgops.local` resolves
+Click **Test Resolution** in the Network tab to verify that `pgops.test` resolves
 correctly from the host machine itself.
 
 ### MinIO over mDNS
 
-MinIO is also accessible at `pgops.local:9000` (API) and `pgops.local:9001` (console).
-Use `pgops.local` as the endpoint in your Laravel `.env`:
+MinIO is also accessible at `pgops.test:9000` (API) and `pgops.test:9001` (console).
+Use `pgops.test` as the endpoint in your Laravel `.env`:
 
 ```env
-AWS_ENDPOINT=http://pgops.local:9000
+AWS_ENDPOINT=http://pgops.test:9000
 ```
 
 ---
@@ -777,7 +777,7 @@ AWS_ENDPOINT=http://pgops.local:9000
 
 ```env
 DB_CONNECTION=pgsql
-DB_HOST=pgops.local
+DB_HOST=pgops.test
 DB_PORT=5432
 DB_DATABASE=your_database_name
 DB_USERNAME=your_database_owner
@@ -803,7 +803,7 @@ AWS_ACCESS_KEY_ID=your_bucket_access_key
 AWS_SECRET_ACCESS_KEY=your_bucket_secret_key
 AWS_DEFAULT_REGION=us-east-1
 AWS_BUCKET=your_bucket_name
-AWS_ENDPOINT=http://pgops.local:9000
+AWS_ENDPOINT=http://pgops.test:9000
 AWS_USE_PATH_STYLE_ENDPOINT=true
 ```
 
@@ -812,7 +812,7 @@ No changes to application code are needed. All `Storage::` calls work as normal.
 ### NativePHP desktop applications
 
 NativePHP applications run as local processes. They connect to PGOps over the LAN
-exactly like any other app — using `pgops.local` as the host. This works whether
+exactly like any other app — using `pgops.test` as the host. This works whether
 the NativePHP app is running on the same machine as PGOps or on a different machine.
 
 ### Running migrations
@@ -821,7 +821,7 @@ the NativePHP app is running on the same machine as PGOps or on a different mach
 php artisan migrate
 ```
 
-Migrations run as the admin user (connecting via `pgops.local`) and create tables in
+Migrations run as the admin user (connecting via `pgops.test`) and create tables in
 your app's database. The app user has full privileges on all tables created by migrations
 including existing and future ones.
 
@@ -834,7 +834,7 @@ including existing and future ones.
 ```javascript
 const { Pool } = require('pg')
 const pool = new Pool({
-  host:     'pgops.local',
+  host:     'pgops.test',
   port:     5432,
   database: 'your_database',
   user:     'your_user',
@@ -848,7 +848,7 @@ const pool = new Pool({
 ```python
 import psycopg2
 conn = psycopg2.connect(
-    host='pgops.local',
+    host='pgops.test',
     port=5432,
     dbname='your_database',
     user='your_user',
@@ -861,7 +861,7 @@ conn = psycopg2.connect(
 
 ```python
 engine = create_engine(
-    'postgresql://your_user:your_password@pgops.local:5432/your_database'
+    'postgresql://your_user:your_password@pgops.test:5432/your_database'
     '?sslmode=require'
 )
 ```
@@ -870,7 +870,7 @@ engine = create_engine(
 
 ```csharp
 "ConnectionStrings": {
-  "DefaultConnection": "Host=pgops.local;Port=5432;Database=your_database;
+  "DefaultConnection": "Host=pgops.test;Port=5432;Database=your_database;
                         Username=your_user;Password=your_password;SSL Mode=Require"
 }
 ```
@@ -878,7 +878,7 @@ engine = create_engine(
 ### File storage (any S3-compatible client)
 
 ```
-Endpoint:  http://pgops.local:9000
+Endpoint:  http://pgops.test:9000
 AccessKey: your_access_key
 SecretKey: your_secret_key
 Bucket:    your_bucket_name
@@ -1013,7 +1013,7 @@ Setup:
 3. Pin that IP in the Network tab
 4. Enable Windows Service Mode
 5. Enable SSL
-6. All apps connect to `pgops.local:5432`
+6. All apps connect to `pgops.test:5432`
 
 ### Scenario B — Developer laptop, no router
 
@@ -1024,7 +1024,7 @@ Setup:
 2. Enable hotspot from the Network tab (SSID: PGOps-Net)
 3. Other devices connect to PGOps-Net WiFi
 4. Pin `192.168.137.1` in the Network tab
-5. All apps connect to `pgops.local:5432` or `192.168.137.1:5432`
+5. All apps connect to `pgops.test:5432` or `192.168.137.1:5432`
 
 ### Scenario C — Existing LAN with router
 
@@ -1032,7 +1032,7 @@ All devices are already on the same router. PGOps runs on one machine.
 
 Setup:
 1. Run the firewall command from the Network tab once as Administrator
-2. Apps connect to `pgops.local:5432` — mDNS handles IP resolution automatically
+2. Apps connect to `pgops.test:5432` — mDNS handles IP resolution automatically
 
 ---
 
@@ -1048,16 +1048,16 @@ and re-run setup.
 
 1. Run the firewall command from the Network tab as Administrator
 2. Verify both machines are on the same network
-3. Try connecting to the IP address directly instead of `pgops.local`
+3. Try connecting to the IP address directly instead of `pgops.test`
 4. If using hotspot: ensure the client device joined the correct hotspot network
 
-### pgops.local doesn't resolve on Windows clients
+### pgops.test doesn't resolve on Windows clients
 
 Windows 10/11 has built-in mDNS. If it still fails:
 - Install Bonjour from Apple (free, used by iTunes)
 - Or connect using the IP address shown in the Network tab instead
 
-### pgops.local doesn't resolve on Linux clients
+### pgops.test doesn't resolve on Linux clients
 
 ```bash
 sudo apt install avahi-daemon

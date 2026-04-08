@@ -1,7 +1,7 @@
 """
 landing_server.py
 Tiny HTTP server on 127.0.0.1:8080.
-Serves the pgops.local landing page — Caddy proxies pgops.local → here.
+Serves the pgops.test landing page — Caddy proxies pgops.test → here.
 """
 
 import threading
@@ -76,7 +76,7 @@ _STYLE = """
 _SETUP_HTML = """
 <div class="setup">
   <h3>Point your device to this DNS server</h3>
-  <p>Do this once per device. After that, all app subdomains (*.pgops.local) work automatically.</p>
+  <p>Do this once per device. After that, all app subdomains (*.pgops.test) work automatically.</p>
   <div class="ip-block">{host_ip}</div>
   <details>
     <summary>Windows</summary>
@@ -158,7 +158,7 @@ class _Handler(BaseHTTPRequestHandler):
     <div class="logo">PG</div>
     <div>
       <h1>PGOps Local Server</h1>
-      <div class="sub">pgops.local — your local app platform</div>
+      <div class="sub">pgops.test — your local app platform</div>
     </div>
   </div>
   <div class="content">
@@ -167,7 +167,7 @@ class _Handler(BaseHTTPRequestHandler):
     <h2>Device Setup</h2>
     {setup}
   </div>
-  <footer>PGOps — Portable PostgreSQL + App Platform · pgops.local</footer>
+  <footer>PGOps — Portable PostgreSQL + App Platform · pgops.test</footer>
 </body>
 </html>"""
 
@@ -181,8 +181,8 @@ class _Handler(BaseHTTPRequestHandler):
 
 class LandingServer:
     """
-    Serves the pgops.local root page on LANDING_PORT (8080).
-    Caddy proxies pgops.local → here.
+    Serves the pgops.test root page on LANDING_PORT (8080).
+    Caddy proxies pgops.test → here.
     """
 
     def __init__(self, get_apps: Callable, get_host_ip: Callable, log_fn=None):

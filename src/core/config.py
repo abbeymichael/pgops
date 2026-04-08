@@ -31,6 +31,8 @@ DEFAULT_CONFIG = {
     "port": 5432,
     "autostart": False,
     "preferred_ip": "",
+    "caddy_http_port": 8088,  # ← use non-privileged port instead of 80
+    "landing_port": 8080,
 }
 
 

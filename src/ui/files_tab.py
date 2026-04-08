@@ -597,7 +597,7 @@ class FilesTab(QWidget):
         info = QLabel(
             "Each bucket has its own access key and secret. "
             "Your Laravel app connects using FILESYSTEM_DISK=s3 "
-            "with AWS_ENDPOINT pointing to pgops.local:9000. "
+            "with AWS_ENDPOINT pointing to pgops.test:9000. "
             "Click + New Bucket to get a ready-to-paste .env block."
         )
         info.setWordWrap(True)
@@ -693,7 +693,7 @@ class FilesTab(QWidget):
             size   = get_bucket_size(name)
             creds  = get_bucket_credentials(name)
             ak     = creds["access_key"] if creds else "—"
-            conn   = f"s3://{name}  |  endpoint: pgops.local:9000"
+            conn   = f"s3://{name}  |  endpoint: pgops.test:9000"
 
             row = self.bucket_table.rowCount()
             self.bucket_table.insertRow(row)
@@ -902,7 +902,7 @@ class FilesTab(QWidget):
             ep = self.minio.endpoint_url()
             self.endpoint_lbl.setText(
                 f"API: {ep}     Console: http://{self.minio.get_lan_ip()}:{self.minio.console_port}"
-                + "  (use IP, not pgops.local)"
+                + "  (use IP, not pgops.test)"
             )
             self.btn_setup.setVisible(False)
         else:

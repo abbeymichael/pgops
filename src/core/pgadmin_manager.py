@@ -439,7 +439,7 @@ FILE_LOG_LEVEL    = 40
         return True, "pgAdmin stopped."
 
     def url(self) -> str:
-        return f"http://pgops.local:{self.port}"
+        return f"http://pgops.test:{self.port}"
 
     def local_url(self) -> str:
         return f"http://127.0.0.1:{self.port}"

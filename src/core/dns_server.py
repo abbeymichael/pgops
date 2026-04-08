@@ -1,7 +1,7 @@
 """
 dns_server.py
 Pure-Python DNS server for PGOps.
-Resolves *.pgops.local → current LAN IP of the PGOps host.
+Resolves *.pgops.test → current LAN IP of the PGOps host.
 All other queries are forwarded to upstream DNS (8.8.8.8).
 
 Requires: dnslib  (pip install dnslib)
@@ -19,7 +19,7 @@ log = logging.getLogger(__name__)
 
 class _PGOpsResolver:
     """
-    Answers *.pgops.local and pgops.local with the host IP.
+    Answers *.pgops.test and pgops.test with the host IP.
     All other queries are forwarded to an upstream resolver.
     """
 
@@ -39,7 +39,7 @@ class _PGOpsResolver:
         reply = request.reply()
         qname = str(request.q.qname).rstrip(".")
 
-        if qname == "pgops.local" or qname.endswith(".pgops.local"):
+        if qname == "pgops.test" or qname.endswith(".pgops.test"):
             reply.add_answer(
                 RR(
                     rname=request.q.qname,
@@ -130,7 +130,7 @@ class DNSServerThread:
         qualifier = "" if self.port == 53 else f" (fallback port {self.port})"
         msg = (
             f"[DNS] Server running on 0.0.0.0:{self.port}{qualifier}. "
-            f"Resolving *.pgops.local → {self.host_ip}"
+            f"Resolving *.pgops.test → {self.host_ip}"
         )
         self._log(msg)
         return True, msg
@@ -162,12 +162,12 @@ class DNSServerThread:
     def status_str(self) -> str:
         if not self._running:
             return "Not running"
-        return f"Running on port {self.port} — *.pgops.local → {self.host_ip}"
+        return f"Running on port {self.port} — *.pgops.test → {self.host_ip}"
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def test_resolution(hostname: str = "pgops.local", timeout: float = 3.0) -> tuple[bool, str]:
+def test_resolution(hostname: str = "pgops.test", timeout: float = 3.0) -> tuple[bool, str]:
     """Resolve hostname using the system resolver (tests end-to-end)."""
     try:
         ip = socket.getaddrinfo(hostname, None, socket.AF_INET)[0][4][0]

@@ -570,7 +570,7 @@ class MainWindow(QMainWindow):
     def _load_databases_async(self):
         if not self.manager.is_running(): return
         cfg = self.config
-        def fn(_p):
+        def fn():
             return dbm.list_databases(cfg["username"], cfg["password"], cfg["port"])
         def done(dbs, error):
             if error: self._log(f"DB list error: {error}"); return
@@ -728,8 +728,8 @@ class MainWindow(QMainWindow):
     def _stop_mdns(self):
         reply = QMessageBox.question(
             self, "Stop Broadcasting",
-            "pgops.local is the hostname all apps use.\n"
-            "Stopping it will make pgops.local unreachable.\n\nContinue?",
+            "pgops.test is the hostname all apps use.\n"
+            "Stopping it will make pgops.test unreachable.\n\nContinue?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )

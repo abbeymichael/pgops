@@ -170,7 +170,7 @@ class SslTab(QWidget):
         cnc.addWidget(_lbl("Use these once SSL is enabled:"))
         cnc.addWidget(_copy_row(
             "URL",
-            f"postgresql://user:pass@pgops.local:{port}/dbname?sslmode=require"
+            f"postgresql://user:pass@pgops.test:{port}/dbname?sslmode=require"
         ))
         cnc.addWidget(_copy_row("Laravel",  "DB_SSLMODE=require  (add to .env)"))
         cnc.addWidget(_copy_row("psycopg2", "sslmode='require'  (add to connect())"))

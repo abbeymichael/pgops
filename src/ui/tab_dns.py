@@ -121,7 +121,7 @@ class DnsTab(QWidget):
 
         v.addWidget(_lbl("DNS Server", C_TEXT, 22, bold=True))
         v.addWidget(_lbl(
-            "PGOps runs a local DNS server so every device resolves *.pgops.local automatically.",
+            "PGOps runs a local DNS server so every device resolves *.pgops.test automatically.",
             C_TEXT3, 12
         ))
 
@@ -184,7 +184,7 @@ class DnsTab(QWidget):
         card = self._card("Client Setup — Point Devices to this DNS Server")
         cv = card.layout()
         cv.addWidget(_lbl(
-            "Do this once per device. After that, all *.pgops.local subdomains work automatically.",
+            "Do this once per device. After that, all *.pgops.test subdomains work automatically.",
             C_TEXT3, 12
         ))
 
@@ -235,14 +235,14 @@ class DnsTab(QWidget):
 
         right = QVBoxLayout()
         right.setSpacing(10)
-        right.addWidget(_lbl("pgops.local/setup", C_BLUE, 14, bold=True))
+        right.addWidget(_lbl("pgops.test/setup", C_BLUE, 14, bold=True))
         right.addWidget(_lbl(
             "Open this URL on any device on your network to see\n"
             "the full DNS configuration instructions.",
             C_TEXT3, 12
         ))
         open_btn = _btn("Open in Browser", C_BLUE, "#3b7de8", h=34)
-        open_btn.clicked.connect(lambda: webbrowser.open("http://pgops.local"))
+        open_btn.clicked.connect(lambda: webbrowser.open("http://pgops.test"))
         right.addWidget(open_btn)
         right.addStretch()
         h.addLayout(right)
@@ -278,7 +278,7 @@ class DnsTab(QWidget):
         if running:
             port = self._dns.port
             qualifier = "" if port == 53 else f" (port {port})"
-            self._status_lbl.setText(f"● RUNNING{qualifier}  —  *.pgops.local → {host_ip}")
+            self._status_lbl.setText(f"● RUNNING{qualifier}  —  *.pgops.test → {host_ip}")
             self._status_lbl.setStyleSheet(
                 f"color:{C_GREEN};font-size:14px;font-weight:700;background:transparent;"
             )
@@ -307,7 +307,7 @@ class DnsTab(QWidget):
                 te.setPlainText(text)
 
         # QR code
-        qr_url = f"http://pgops.local"
+        qr_url = f"http://pgops.test"
         px = _make_qr_pixmap(qr_url, 190)
         if px:
             self._qr_lbl.setPixmap(px)

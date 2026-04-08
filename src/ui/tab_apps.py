@@ -244,7 +244,7 @@ class DeployWizard(QDialog):
     def _update_preview(self, text: str):
         slug = text.strip().lower()
         if slug:
-            self._slug_preview.setText(f"→ http://{slug}.pgops.local")
+            self._slug_preview.setText(f"→ http://{slug}.pgops.test")
         else:
             self._slug_preview.setText("")
 

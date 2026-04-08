@@ -30,6 +30,33 @@ def _popen_kwargs() -> dict:
     return {}
 
 
+
+def _free_port(port: int):
+    """Kill any process listening on the given TCP port (cleans up orphaned processes)."""
+    try:
+        if platform.system() == "Windows":
+            # Find PID using netstat, then kill it
+            result = subprocess.run(
+                ["netstat", "-ano", "-p", "TCP"],
+                capture_output=True, text=True, **_popen_kwargs()
+            )
+            for line in result.stdout.splitlines():
+                if f"127.0.0.1:{port}" in line and "LISTENING" in line:
+                    parts = line.split()
+                    pid = int(parts[-1])
+                    subprocess.run(
+                        ["taskkill", "/F", "/PID", str(pid)],
+                        capture_output=True, **_popen_kwargs()
+                    )
+                    break
+        else:
+            subprocess.run(
+                ["lsof", "-ti", f"tcp:{port}"],
+                capture_output=True, text=True
+            )
+    except Exception:
+        pass  # best-effort; don't block startup
+
 # ── Paths ─────────────────────────────────────────────────────────────────────
 
 def get_frankenphp_dir() -> Path:
@@ -243,6 +270,7 @@ class AppProcess:
             return False, f"App public/ directory not found: {public_dir}"
 
         port = self.app["internal_port"]
+        _free_port(port)
         env  = self._build_env()
 
         cmd = [

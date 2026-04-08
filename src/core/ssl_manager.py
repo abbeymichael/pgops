@@ -35,7 +35,7 @@ def is_ssl_configured(base_dir: Path) -> bool:
     return cert_path(base_dir).exists() and key_path(base_dir).exists()
 
 
-def generate_certificate(base_dir: Path, hostname: str = "pgops.local") -> tuple[bool, str]:
+def generate_certificate(base_dir: Path, hostname: str = "pgops.test") -> tuple[bool, str]:
     """
     Generate a self-signed TLS certificate valid for 10 years.
     Uses the cryptography library — no openssl binary needed.
@@ -64,7 +64,7 @@ def generate_certificate(base_dir: Path, hostname: str = "pgops.local") -> tuple
         x509.NameAttribute(NameOID.ORGANIZATION_NAME, "PGOps"),
     ])
 
-    # SAN: include pgops.local, localhost, 127.0.0.1, and common LAN ranges
+    # SAN: include pgops.test, localhost, 127.0.0.1, and common LAN ranges
     san_entries = [
         DNSName(hostname),
         DNSName("localhost"),
