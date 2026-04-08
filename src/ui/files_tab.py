@@ -11,37 +11,76 @@ from PyQt6.QtWidgets import (
     QLineEdit, QTableWidget, QTableWidgetItem, QHeaderView,
     QDialog, QDialogButtonBox, QAbstractItemView, QFrame,
     QTextEdit, QProgressBar, QMessageBox, QFileDialog,
-    QScrollArea, QGroupBox, QTabWidget,
+    QScrollArea, QGroupBox, QTabWidget, QApplication,
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt6.QtGui import QColor, QFont
 
+# ── Colour tokens — match tab_server.py / theme.py ───────────────────────────
+C_BG      = "#1a1d23"
+C_SURFACE = "#20232b"
+C_SURFACE2= "#262930"
+C_BORDER  = "#2e3140"
+C_BORDER2 = "#3a3e50"
+C_TEXT    = "#e8eaf0"
+C_TEXT2   = "#b0b8cc"
+C_TEXT3   = "#6b7394"
+C_GREEN   = "#22c55e"
+C_RED     = "#ef4444"
+C_BLUE    = "#4f7ef8"
+C_AMBER   = "#f59e0b"
 
-TABLE_STYLE = """
-QTableWidget{
-    background:#0a1020;color:#e2e8f0;border:1px solid #1e293b;
-    border-radius:6px;gridline-color:#1e293b;font-size:12px;
-}
-QTableWidget::item{padding:5px 8px;}
-QTableWidget::item:selected{background:#1e40af;}
-QTableWidget::item:alternate{background:#080f1e;}
-QHeaderView::section{
-    background:#1e293b;color:#64748b;padding:6px;
-    border:none;font-size:12px;font-weight:bold;
-}
+TABLE_STYLE = f"""
+QTableWidget{{
+    background:{C_SURFACE};color:{C_TEXT};border:0px solid {C_BORDER};
+    border-radius:8px;gridline-color:{C_BORDER};font-size:12px;
+}}
+QTableWidget::item{{padding:6px 10px;}}
+QTableWidget::item:selected{{background:{C_BLUE}55;color:{C_TEXT};}}
+QTableWidget::item:alternate{{background:{C_BG};}}
+QHeaderView::section{{
+    background:{C_SURFACE2};color:{C_TEXT3};padding:7px 10px;
+    border:none;border-bottom:1px solid {C_BORDER};
+    font-size:10px;font-weight:700;letter-spacing:1px;
+}}
+QScrollBar:vertical{{background:{C_BG};width:6px;border-radius:3px;}}
+QScrollBar::handle:vertical{{background:{C_BORDER2};border-radius:3px;}}
 """
 
-DIALOG_STYLE = "background:#0f172a;color:#e2e8f0;"
+DIALOG_STYLE = f"background:{C_SURFACE};color:{C_TEXT};"
 
 
-def _btn(text, bg="#1d4ed8", hover="#1e40af", fg="white", h=36):
+def _card(parent=None):
+    w = QWidget(parent)
+    w.setStyleSheet(
+        f"background:{C_SURFACE};border:1px solid {C_BORDER};"
+        f"border-radius:10px;"
+    )
+    return w
+
+
+def _make_hdr_btn(text, bg, hover, fg="white"):
+    b = QPushButton(text)
+    b.setFixedHeight(34)
+    b.setCursor(Qt.CursorShape.PointingHandCursor)
+    b.setStyleSheet(
+        f"QPushButton{{background:{bg};color:{fg};border:none;"
+        f"border-radius:7px;font-size:12px;font-weight:600;padding:0 14px;}}"
+        f"QPushButton:hover{{background:{hover};}}"
+        f"QPushButton:disabled{{background:{C_BORDER};color:{C_TEXT3};}}"
+    )
+    return b
+
+
+def _btn(text, bg=C_BLUE, hover="#3b6de8", fg="white", h=36):
     b = QPushButton(text)
     b.setFixedHeight(h)
+    b.setCursor(Qt.CursorShape.PointingHandCursor)
     b.setStyleSheet(
         f"QPushButton{{background:{bg};color:{fg};border:none;"
         f"border-radius:6px;padding:0 14px;font-size:12px;font-weight:600;}}"
         f"QPushButton:hover{{background:{hover};}}"
-        f"QPushButton:disabled{{background:#1e293b;color:#475569;}}"
+        f"QPushButton:disabled{{background:{C_BORDER};color:{C_TEXT3};}}"
     )
     return b
 
@@ -51,15 +90,16 @@ def _inp(val="", placeholder=""):
     if placeholder:
         f.setPlaceholderText(placeholder)
     f.setStyleSheet(
-        "background:#1e293b;border:1px solid #334155;border-radius:5px;"
-        "padding:5px 10px;color:#e2e8f0;font-size:13px;"
+        f"background:{C_SURFACE2};border:1px solid {C_BORDER2};border-radius:6px;"
+        f"padding:6px 10px;color:{C_TEXT};font-size:13px;"
+        f"selection-background-color:{C_BLUE}55;"
     )
     return f
 
 
-def _lbl(text, color="#94a3b8", size=12):
+def _lbl(text, color=C_TEXT3, size=12):
     l = QLabel(text)
-    l.setStyleSheet(f"color:{color};font-size:{size}px;")
+    l.setStyleSheet(f"color:{color};font-size:{size}px;background:transparent;")
     return l
 
 
@@ -84,41 +124,109 @@ class Worker(QThread):
             self.done.emit(False, str(e))
 
 
+# ─── Credential field widget (matches server tab ConnField style) ─────────────
+class _CredField(QWidget):
+    """A labelled read-only field with a copy icon button — matches the image."""
+
+    def __init__(self, label: str, value: str, password: bool = False, parent=None):
+        super().__init__(parent)
+        self._value = value
+        self.setStyleSheet(
+            f"background:{C_BG};border:1px solid {C_BORDER};"
+            f"border-radius:8px;"
+        )
+
+        v = QVBoxLayout(self)
+        v.setContentsMargins(14, 10, 14, 10)
+        v.setSpacing(4)
+
+        lbl = QLabel(label)
+        lbl.setStyleSheet(
+            f"color:{C_TEXT3};font-size:9px;font-weight:700;"
+            f"letter-spacing:1.5px;background:transparent;border:none;"
+        )
+
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
+
+        if password:
+            self._val_lbl = QLabel("•" * max(14, len(value)))
+        else:
+            display = value if len(value) <= 22 else value[:18] + "..."
+            self._val_lbl = QLabel(display)
+        self._val_lbl.setStyleSheet(
+            f"color:{C_TEXT};font-size:13px;font-weight:600;"
+            f"font-family:'Consolas','Courier New',monospace;"
+            f"background:transparent;border:none;"
+        )
+        self._val_lbl.setToolTip(value)
+
+        copy_btn = QPushButton("⧉")
+        copy_btn.setFixedSize(26, 26)
+        copy_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        copy_btn.setStyleSheet(
+            f"QPushButton{{background:{C_SURFACE2};color:{C_TEXT3};"
+            f"border:1px solid {C_BORDER2};border-radius:5px;font-size:13px;}}"
+            f"QPushButton:hover{{background:{C_BORDER2};color:{C_TEXT};}}"
+        )
+        copy_btn.clicked.connect(
+            lambda: (
+                QApplication.clipboard().setText(value),
+                copy_btn.setText("✓"),
+                QTimer.singleShot(1200, lambda: copy_btn.setText("⧉"))
+            )
+        )
+
+        row.addWidget(self._val_lbl, 1)
+        row.addWidget(copy_btn, 0)
+
+        v.addWidget(lbl)
+        v.addLayout(row)
+
+
 # ─── Create Bucket Dialog ─────────────────────────────────────────────────────
 class CreateBucketDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Create Bucket")
-        self.setFixedWidth(440)
+        self.setFixedWidth(460)
         self.setStyleSheet(DIALOG_STYLE)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 24, 24, 24)
         layout.setSpacing(12)
 
-        layout.addWidget(_lbl("Bucket Name", "#94a3b8"))
-        self.name_field = _inp(placeholder="e.g. my-app-files (lowercase, no spaces)")
+        title = QLabel("New Storage Bucket")
+        title.setStyleSheet(
+            f"color:{C_TEXT};font-size:16px;font-weight:700;background:transparent;"
+        )
+        layout.addWidget(title)
+
+        layout.addSpacing(4)
+        layout.addWidget(_lbl("BUCKET NAME", C_TEXT3, 10))
+        self.name_field = _inp(placeholder="e.g. my-app-files  (lowercase, no spaces)")
         layout.addWidget(self.name_field)
 
-        layout.addWidget(_lbl("App / Label (optional)", "#94a3b8"))
-        self.app_field = _inp(placeholder="e.g. MyApp (used to prefix access key)")
+        layout.addWidget(_lbl("APP / LABEL (optional)", C_TEXT3, 10))
+        self.app_field = _inp(placeholder="e.g. MyApp  (used to prefix access key)")
         layout.addWidget(self.app_field)
 
         info = QLabel(
             "PGOps will automatically create:\n"
-            "  - The storage bucket\n"
-            "  - A dedicated access key\n"
-            "  - A policy scoped to this bucket only\n\n"
+            "  •  The storage bucket\n"
+            "  •  A dedicated access key\n"
+            "  •  A policy scoped to this bucket only\n\n"
             "Other apps cannot access this bucket with their credentials."
         )
         info.setWordWrap(True)
         info.setStyleSheet(
-            "background:#1e293b;color:#64748b;padding:10px;"
-            "border-radius:6px;font-size:11px;"
+            f"background:{C_BG};color:{C_TEXT3};padding:12px 14px;"
+            f"border-radius:8px;font-size:11px;border:1px solid {C_BORDER};"
         )
         layout.addWidget(info)
 
-        self.error_lbl = _lbl("", "#ef4444")
+        self.error_lbl = _lbl("", C_RED)
         self.error_lbl.setVisible(False)
         layout.addWidget(self.error_lbl)
 
@@ -129,9 +237,9 @@ class CreateBucketDialog(QDialog):
         btns.accepted.connect(self._validate)
         btns.rejected.connect(self.reject)
         btns.setStyleSheet(
-            "QPushButton{background:#1e293b;color:#e2e8f0;border:none;"
-            "border-radius:5px;padding:6px 18px;}"
-            "QPushButton:hover{background:#334155;}"
+            f"QPushButton{{background:{C_SURFACE2};color:{C_TEXT2};border:1px solid {C_BORDER2};"
+            f"border-radius:6px;padding:6px 20px;font-size:12px;font-weight:600;}}"
+            f"QPushButton:hover{{background:{C_BORDER2};color:{C_TEXT};}}"
         )
         layout.addWidget(btns)
 
@@ -157,98 +265,142 @@ class CreateBucketDialog(QDialog):
 
 # ─── Credentials Dialog ───────────────────────────────────────────────────────
 class CredentialsDialog(QDialog):
-    """Shows the generated credentials and Laravel .env snippet."""
+    """Shows the generated credentials — styled to match the image mockup."""
 
     def __init__(self, creds: dict, endpoint: str, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Bucket Credentials")
-        self.setFixedWidth(560)
+        self.setWindowTitle("Generated Credentials")
+        self.setFixedWidth(580)
         self.setStyleSheet(DIALOG_STYLE)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 24, 24, 24)
-        layout.setSpacing(14)
+        layout.setContentsMargins(28, 26, 28, 26)
+        layout.setSpacing(0)
 
-        title = QLabel("Bucket Created Successfully")
-        title.setStyleSheet("color:#22c55e;font-size:15px;font-weight:bold;")
-        layout.addWidget(title)
-
-        warn = QLabel(
-            "Save the secret key now — it cannot be retrieved later.\n"
-            "You can rotate keys at any time from the Files tab."
+        # ── Header ──────────────────────────────────────────────────────────
+        hdr_row = QHBoxLayout()
+        title = QLabel("Generated Credentials")
+        title.setStyleSheet(
+            f"color:{C_TEXT};font-size:17px;font-weight:700;background:transparent;"
         )
-        warn.setWordWrap(True)
-        warn.setStyleSheet(
-            "background:#451a03;color:#fdba74;padding:10px;"
-            "border-radius:6px;font-size:12px;"
+        close_btn = QPushButton("✕")
+        close_btn.setFixedSize(28, 28)
+        close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        close_btn.setStyleSheet(
+            f"QPushButton{{background:transparent;color:{C_TEXT3};"
+            f"border:none;border-radius:6px;font-size:14px;}}"
+            f"QPushButton:hover{{background:{C_BORDER};color:{C_TEXT};}}"
         )
-        layout.addWidget(warn)
+        close_btn.clicked.connect(self.accept)
+        hdr_row.addWidget(title)
+        hdr_row.addStretch()
+        hdr_row.addWidget(close_btn)
+        layout.addLayout(hdr_row)
 
-        # Credentials
-        for label, value in [
-            ("Bucket",     creds.get("bucket", "")),
-            ("Access Key", creds.get("access_key", "")),
-            ("Secret Key", creds.get("secret_key", "")),
-            ("Endpoint",   endpoint),
-        ]:
-            row = QHBoxLayout()
-            lbl = _lbl(label)
-            lbl.setFixedWidth(90)
-            field = QLineEdit(value)
-            field.setReadOnly(True)
-            field.setStyleSheet(
-                "background:#1e293b;border:1px solid #334155;"
-                "border-radius:5px;padding:5px 10px;"
-                "color:#e2e8f0;font-family:monospace;font-size:12px;"
-            )
-            copy_btn = QPushButton("Copy")
-            copy_btn.setFixedSize(50, 26)
-            copy_btn.setStyleSheet(
-                "QPushButton{background:#334155;color:#94a3b8;"
-                "border:none;border-radius:4px;font-size:11px;}"
-                "QPushButton:hover{background:#475569;color:#fff;}"
-            )
-            copy_btn.clicked.connect(
-                lambda checked, v=value, b=copy_btn: (
-                    __import__('PyQt6.QtWidgets', fromlist=['QApplication'])
-                    .QApplication.clipboard().setText(v),
-                    b.setText("OK"),
-                    QTimer.singleShot(1200, lambda: b.setText("Copy"))
-                )
-            )
-            row.addWidget(lbl)
-            row.addWidget(field)
-            row.addWidget(copy_btn)
-            layout.addLayout(row)
+        sub = QLabel("Store these securely. You will not be able to see the Secret Key again.")
+        sub.setStyleSheet(f"color:{C_TEXT3};font-size:12px;background:transparent;")
+        layout.addWidget(sub)
+        layout.addSpacing(18)
 
-        # Laravel .env snippet
+        # ── 2x2 credential grid ──────────────────────────────────────────────
+        bucket   = creds.get("bucket", "")
+        acc_key  = creds.get("access_key", "")
+        sec_key  = creds.get("secret_key", "")
+        region   = "us-east-1"
+
+        grid_top = QHBoxLayout()
+        grid_top.setSpacing(12)
+        grid_top.addWidget(_CredField("BUCKET NAME",    bucket))
+        grid_top.addWidget(_CredField("DEFAULT REGION", region))
+        layout.addLayout(grid_top)
+
+        layout.addSpacing(12)
+
+        grid_bot = QHBoxLayout()
+        grid_bot.setSpacing(12)
+        grid_bot.addWidget(_CredField("ACCESS KEY ID",    acc_key))
+        grid_bot.addWidget(_CredField("SECRET ACCESS KEY", sec_key, password=True))
+        layout.addLayout(grid_bot)
+
+        layout.addSpacing(18)
+
+        # ── Laravel .env block ───────────────────────────────────────────────
+        env_hdr = QLabel("LARAVEL .ENV CONFIGURATION")
+        env_hdr.setStyleSheet(
+            f"color:{C_TEXT3};font-size:9px;font-weight:700;"
+            f"letter-spacing:1.5px;background:transparent;"
+        )
+        layout.addWidget(env_hdr)
+        layout.addSpacing(8)
+
         from core.bucket_manager import get_laravel_env
-        env_text = get_laravel_env(
-            creds.get("bucket", ""),
-            creds.get("access_key", ""),
-            creds.get("secret_key", ""),
-            endpoint,
+        env_text = get_laravel_env(bucket, acc_key, sec_key, endpoint)
+
+        env_wrap = QWidget()
+        env_wrap.setStyleSheet(
+            f"background:{C_BG};border:1px solid {C_BORDER};border-radius:8px;"
         )
-        layout.addWidget(_lbl("Laravel .env  (copy into your app)", "#94a3b8"))
+        env_wl = QVBoxLayout(env_wrap)
+        env_wl.setContentsMargins(0, 0, 0, 0)
+        env_wl.setSpacing(0)
+
+        env_top_row = QHBoxLayout()
+        env_top_row.setContentsMargins(14, 10, 10, 0)
+        env_top_row.addStretch()
+
+        copy_env_btn = QPushButton("⧉  COPY")
+        copy_env_btn.setFixedHeight(26)
+        copy_env_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        copy_env_btn.setStyleSheet(
+            f"QPushButton{{background:{C_SURFACE2};color:{C_TEXT3};"
+            f"border:1px solid {C_BORDER2};border-radius:5px;"
+            f"font-size:10px;font-weight:700;padding:0 10px;letter-spacing:0.5px;}}"
+            f"QPushButton:hover{{background:{C_BORDER2};color:{C_TEXT};}}"
+        )
+        copy_env_btn.clicked.connect(
+            lambda: (
+                QApplication.clipboard().setText(env_text),
+                copy_env_btn.setText("✓  COPIED"),
+                QTimer.singleShot(1400, lambda: copy_env_btn.setText("⧉  COPY"))
+            )
+        )
+        env_top_row.addWidget(copy_env_btn)
+
+        env_top_widget = QWidget()
+        env_top_widget.setStyleSheet("background:transparent;")
+        env_top_widget.setLayout(env_top_row)
+        env_wl.addWidget(env_top_widget)
+
         env_box = QTextEdit(env_text)
         env_box.setReadOnly(True)
-        env_box.setFixedHeight(160)
+        env_box.setFixedHeight(148)
         env_box.setStyleSheet(
-            "background:#020617;color:#86efac;font-family:monospace;"
-            "font-size:12px;border:1px solid #1e293b;border-radius:6px;padding:8px;"
+            f"background:transparent;color:#86efac;"
+            f"font-family:'Consolas','Courier New',monospace;"
+            f"font-size:12px;border:none;padding:4px 14px 12px 14px;"
         )
-        layout.addWidget(env_box)
+        env_wl.addWidget(env_box)
+        layout.addWidget(env_wrap)
 
-        copy_env_btn = _btn("Copy .env Block", "#1d4ed8", "#1e40af")
-        copy_env_btn.clicked.connect(
-            lambda: __import__('PyQt6.QtWidgets', fromlist=['QApplication'])
-            .QApplication.clipboard().setText(env_text)
+        layout.addSpacing(20)
+
+        # ── Footer button ────────────────────────────────────────────────────
+        finish_btn = QPushButton("Finish & Return")
+        finish_btn.setFixedHeight(42)
+        finish_btn.setFixedWidth(160)
+        finish_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        finish_btn.setStyleSheet(
+            f"QPushButton{{background:{C_TEXT};color:{C_BG};"
+            f"border:none;border-radius:8px;"
+            f"font-size:13px;font-weight:700;}}"
+            f"QPushButton:hover{{background:#d0d4e0;}}"
         )
-        layout.addWidget(copy_env_btn)
+        finish_btn.clicked.connect(self.accept)
 
-        close_btn = _btn("Done", "#065f46", "#047857")
-        close_btn.clicked.connect(self.accept)
-        layout.addWidget(close_btn)
+        footer = QHBoxLayout()
+        footer.addStretch()
+        footer.addWidget(finish_btn)
+        layout.addLayout(footer)
 
 
 # ─── Files Tab Widget ─────────────────────────────────────────────────────────
@@ -272,86 +424,153 @@ class FilesTab(QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # Header bar
-        bar = QWidget()
-        bar.setFixedHeight(52)
-        bar.setStyleSheet("background:#080f1e;border-bottom:1px solid #1e293b;")
-        bh = QHBoxLayout(bar)
-        bh.setContentsMargins(16, 0, 16, 0)
-        bh.setSpacing(10)
+        # ── Page header — matches ServerTab._page_header() ────────────────
+        hdr = QWidget()
+        hdr.setFixedHeight(72)
+        hdr.setStyleSheet(f"background:{C_BG};border-bottom:1px solid {C_BORDER};")
+        hh = QHBoxLayout(hdr)
+        hh.setContentsMargins(28, 0, 28, 0)
 
-        # Status
-        self.server_badge = QLabel("MinIO: STOPPED")
-        self.server_badge.setStyleSheet(
-            "color:#ef4444;background:#1c0a0a;border:1px solid #ef444444;"
-            "border-radius:12px;padding:2px 12px;font-size:12px;font-weight:bold;"
+        col = QVBoxLayout()
+        col.setSpacing(4)
+
+        title_row = QHBoxLayout()
+        title_row.setSpacing(12)
+        page_title = QLabel("Persistent Storage")
+        page_title.setStyleSheet(
+            f"color:{C_TEXT};font-size:24px;font-weight:800;background:transparent;"
         )
-        bh.addWidget(self.server_badge)
-        bh.addStretch()
+        badge = QLabel("MINIO")
+        badge.setStyleSheet(
+            f"color:{C_TEXT3};background:{C_SURFACE};border:1px solid {C_BORDER2};"
+            f"border-radius:4px;font-size:9px;font-weight:800;"
+            f"letter-spacing:1.5px;padding:3px 8px;"
+        )
+        title_row.addWidget(page_title)
+        title_row.addWidget(badge)
+        title_row.addStretch()
+        col.addLayout(title_row)
 
-        # Start / Stop
-        self.btn_start = _btn("Start Storage", "#065f46", "#047857", h=30)
-        self.btn_stop  = _btn("Stop",          "#7f1d1d", "#991b1b", "#fca5a5", h=30)
-        self.btn_setup = _btn("Download MinIO", "#92400e", "#b45309", "#fef3c7", h=30)
+        sub_row = QHBoxLayout()
+        sub_row.setSpacing(8)
+        self.server_badge = QLabel("● STOPPED")
+        self.server_badge.setStyleSheet(
+            f"color:{C_RED};font-size:12px;background:transparent;"
+        )
+        sub_row.addWidget(self.server_badge)
+        sub_row.addStretch()
+        col.addLayout(sub_row)
+
+        hh.addLayout(col)
+        hh.addStretch()
+
+        # Action buttons in header
+        self.btn_start = _make_hdr_btn("▶  Start Storage", "#166534", "#15803d", "#86efac")
+        self.btn_stop  = _make_hdr_btn("■  Stop",          "#7f1d1d", "#991b1b", "#fca5a5")
         self.btn_start.clicked.connect(self._start)
         self.btn_stop.clicked.connect(self._stop)
-        self.btn_setup.clicked.connect(self._setup)
-        bh.addWidget(self.btn_setup)
-        bh.addWidget(self.btn_start)
-        bh.addWidget(self.btn_stop)
+        hh.addWidget(self.btn_start)
+        hh.addSpacing(8)
+        hh.addWidget(self.btn_stop)
+        root.addWidget(hdr)
 
-        # Open Console button
-        self.btn_console = _btn("Open Web Console", "#1e293b", "#334155", "#94a3b8", h=30)
-        self.btn_console.clicked.connect(self._open_console)
-        bh.addWidget(self.btn_console)
-
-        root.addWidget(bar)
-
-        # Progress bar
+        # ── Progress bar ──────────────────────────────────────────────────
         self.prog = QProgressBar()
         self.prog.setVisible(False)
-        self.prog.setFixedHeight(4)
+        self.prog.setFixedHeight(3)
+        self.prog.setTextVisible(False)
         self.prog.setStyleSheet(
-            "QProgressBar{background:#1e293b;border:none;}"
-            "QProgressBar::chunk{background:#22c55e;}"
+            f"QProgressBar{{background:{C_BORDER};border:none;}}"
+            f"QProgressBar::chunk{{background:{C_GREEN};}}"
         )
         root.addWidget(self.prog)
 
-        # Main content
-        content = QWidget()
-        content.setStyleSheet("background:#0f172a;")
-        cv = QVBoxLayout(content)
-        cv.setContentsMargins(18, 16, 18, 16)
-        cv.setSpacing(14)
+        # ── Scrollable body ───────────────────────────────────────────────
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setStyleSheet("background:transparent;border:none;")
 
-        # Endpoint info
-        self.endpoint_lbl = QLabel("Endpoint: —")
-        self.endpoint_lbl.setStyleSheet(
-            "color:#64748b;font-size:12px;font-family:monospace;"
+        body = QWidget()
+        body.setStyleSheet(f"background:{C_BG};")
+        bv = QVBoxLayout(body)
+        bv.setContentsMargins(28, 24, 28, 28)
+        bv.setSpacing(18)
+
+        # ── Status / endpoint card ────────────────────────────────────────
+        status_card = _card()
+        sc = QHBoxLayout(status_card)
+        sc.setContentsMargins(20, 14, 20, 14)
+        sc.setSpacing(14)
+
+        ep_col = QVBoxLayout()
+        ep_col.setSpacing(3)
+        ep_title = QLabel("Storage Endpoint")
+        ep_title.setStyleSheet(
+            f"color:{C_TEXT};font-size:13px;font-weight:700;background:transparent;"
         )
-        cv.addWidget(self.endpoint_lbl)
+        self.endpoint_lbl = QLabel("Endpoint: — (start storage server)")
+        self.endpoint_lbl.setStyleSheet(
+            f"color:{C_TEXT3};font-size:12px;font-family:'Consolas','Courier New',monospace;"
+            f"background:transparent;"
+        )
+        ep_col.addWidget(ep_title)
+        ep_col.addWidget(self.endpoint_lbl)
+        sc.addLayout(ep_col, 1)
 
-        # Toolbar
-        tb = QHBoxLayout()
-        self.btn_refresh  = _btn("Refresh",          "#1e293b", "#334155", "#94a3b8", h=30)
-        self.btn_create   = _btn("New Bucket",        "#065f46", "#047857", h=30)
-        self.btn_drop     = _btn("Drop Selected",     "#7f1d1d", "#991b1b", "#fca5a5", h=30)
-        self.btn_creds    = _btn("Show Credentials",  "#1e293b", "#334155", "#94a3b8", h=30)
-        self.btn_rotate   = _btn("Rotate Keys",       "#1e293b", "#334155", "#94a3b8", h=30)
-        self.btn_backup   = _btn("Backup Bucket",     "#1d4ed8", "#1e40af", h=30)
+        self.btn_setup = _make_hdr_btn("⚙  Setup MinIO", "#78350f", "#92400e", "#fef3c7")
+        self.btn_setup.clicked.connect(self._setup)
+        self.btn_console = _make_hdr_btn("Open Web Console →", C_SURFACE2, C_BORDER2, C_TEXT2)
+        self.btn_console.clicked.connect(self._open_console)
+        sc.addWidget(self.btn_setup)
+        sc.addWidget(self.btn_console)
+        bv.addWidget(status_card)
+
+        # ── Buckets card ──────────────────────────────────────────────────
+        buckets_card = _card()
+        bc = QVBoxLayout(buckets_card)
+        bc.setContentsMargins(22, 20, 22, 20)
+        bc.setSpacing(14)
+
+        buckets_hdr = QHBoxLayout()
+        bh_col = QVBoxLayout()
+        bh_col.setSpacing(3)
+        bt = QLabel("Storage Buckets")
+        bt.setStyleSheet(
+            f"color:{C_TEXT};font-size:15px;font-weight:700;background:transparent;"
+        )
+        bsub = QLabel("Manage buckets and access credentials for your applications.")
+        bsub.setStyleSheet(f"color:{C_TEXT3};font-size:12px;background:transparent;")
+        bh_col.addWidget(bt)
+        bh_col.addWidget(bsub)
+        buckets_hdr.addLayout(bh_col)
+        buckets_hdr.addStretch()
+
+        # Toolbar buttons
+        self.btn_refresh  = _btn("Refresh",       C_SURFACE2, C_BORDER2, C_TEXT2, h=32)
+        self.btn_create   = _btn("+ New Bucket",   "#166534",  "#15803d", "#86efac", h=32)
+        self.btn_drop     = _btn("Drop",           "#7f1d1d",  "#991b1b", "#fca5a5", h=32)
+        self.btn_creds    = _btn("Credentials",    C_SURFACE2, C_BORDER2, C_TEXT2, h=32)
+        self.btn_rotate   = _btn("Rotate Keys",    C_SURFACE2, C_BORDER2, C_TEXT2, h=32)
+        self.btn_backup   = _btn("Backup",         C_BLUE,     "#3b6de8", "white",  h=32)
+
         self.btn_refresh.clicked.connect(self.refresh_buckets)
         self.btn_create.clicked.connect(self._create_bucket)
         self.btn_drop.clicked.connect(self._drop_bucket)
         self.btn_creds.clicked.connect(self._show_credentials)
         self.btn_rotate.clicked.connect(self._rotate_keys)
         self.btn_backup.clicked.connect(self._backup_bucket)
+
+        tb = QHBoxLayout()
+        tb.setSpacing(8)
         for b in (self.btn_refresh, self.btn_create, self.btn_drop,
                   self.btn_creds, self.btn_rotate, self.btn_backup):
             tb.addWidget(b)
-        tb.addStretch()
-        cv.addLayout(tb)
 
-        # Buckets table
+        buckets_hdr.addLayout(tb)
+        bc.addLayout(buckets_hdr)
+
         self.bucket_table = QTableWidget(0, 4)
         self.bucket_table.setHorizontalHeaderLabels([
             "Bucket", "Size", "Access Key", "Connection String"
@@ -371,22 +590,25 @@ class FilesTab(QWidget):
         self.bucket_table.setAlternatingRowColors(True)
         self.bucket_table.setStyleSheet(TABLE_STYLE)
         self.bucket_table.verticalHeader().setVisible(False)
-        cv.addWidget(self.bucket_table)
+        self.bucket_table.setMinimumHeight(180)
+        bc.addWidget(self.bucket_table)
 
-        # Laravel info box
+        # Info note
         info = QLabel(
             "Each bucket has its own access key and secret. "
             "Your Laravel app connects using FILESYSTEM_DISK=s3 "
             "with AWS_ENDPOINT pointing to pgops.local:9000. "
-            "Click New Bucket to get a ready-to-paste .env block."
+            "Click + New Bucket to get a ready-to-paste .env block."
         )
         info.setWordWrap(True)
-        info.setStyleSheet("color:#334155;font-size:11px;")
-        cv.addWidget(info)
+        info.setStyleSheet(f"color:{C_TEXT3};font-size:11px;background:transparent;")
+        bc.addWidget(info)
+        bv.addWidget(buckets_card)
 
-        root.addWidget(content)
+        scroll.setWidget(body)
+        root.addWidget(scroll)
 
-        # Refresh status every 5s
+        # ── Timers ────────────────────────────────────────────────────────
         self._status_timer = QTimer(self)
         self._status_timer.timeout.connect(self._update_status)
         self._status_timer.start(5000)
@@ -397,7 +619,7 @@ class FilesTab(QWidget):
     def _start(self):
         if not self.minio.is_binaries_available():
             QMessageBox.information(self, "Setup Required",
-                "Click 'Download MinIO' first to get the MinIO binaries.")
+                "Click 'Setup MinIO' first to get the MinIO binaries.")
             return
         self.btn_start.setEnabled(False)
         self._log_status("Starting MinIO...")
@@ -574,15 +796,23 @@ class FilesTab(QWidget):
         dlg.setStyleSheet(DIALOG_STYLE)
         v = QVBoxLayout(dlg)
         v.setContentsMargins(20, 20, 20, 20)
+        v.setSpacing(10)
+
+        t = QLabel(f"Credentials — {name}")
+        t.setStyleSheet(
+            f"color:{C_TEXT};font-size:15px;font-weight:700;background:transparent;"
+        )
+        v.addWidget(t)
+
         txt = QTextEdit(msg)
         txt.setReadOnly(True)
         txt.setStyleSheet(
-            "background:#020617;color:#86efac;font-family:monospace;"
-            "font-size:12px;border:1px solid #1e293b;border-radius:6px;padding:8px;"
+            f"background:{C_BG};color:#86efac;font-family:'Consolas','Courier New',monospace;"
+            f"font-size:12px;border:1px solid {C_BORDER};border-radius:8px;padding:10px;"
         )
-        copy_btn = _btn("Copy All")
+        copy_btn = _btn("Copy All", C_BLUE, "#3b6de8")
         copy_btn.clicked.connect(lambda: QApplication.clipboard().setText(msg))
-        close_btn = _btn("Close", "#1e293b", "#334155", "#94a3b8")
+        close_btn = _btn("Close", C_SURFACE2, C_BORDER2, C_TEXT2)
         close_btn.clicked.connect(dlg.accept)
         row2 = QHBoxLayout()
         row2.addWidget(copy_btn)
@@ -665,21 +895,20 @@ class FilesTab(QWidget):
         binaries = self.minio.is_binaries_available()
 
         if running:
-            self.server_badge.setText("MinIO: RUNNING")
+            self.server_badge.setText("● RUNNING")
             self.server_badge.setStyleSheet(
-                "color:#22c55e;background:#0a1c0f;border:1px solid #22c55e44;"
-                "border-radius:12px;padding:2px 12px;font-size:12px;font-weight:bold;"
+                f"color:{C_GREEN};font-size:12px;background:transparent;"
             )
             ep = self.minio.endpoint_url()
             self.endpoint_lbl.setText(
-                f"API: {ep}     Console: http://{self.minio.get_lan_ip()}:{self.minio.console_port}"  + "  (use IP, not pgops.local)"
+                f"API: {ep}     Console: http://{self.minio.get_lan_ip()}:{self.minio.console_port}"
+                + "  (use IP, not pgops.local)"
             )
             self.btn_setup.setVisible(False)
         else:
-            self.server_badge.setText("MinIO: STOPPED")
+            self.server_badge.setText("● STOPPED")
             self.server_badge.setStyleSheet(
-                "color:#ef4444;background:#1c0a0a;border:1px solid #ef444444;"
-                "border-radius:12px;padding:2px 12px;font-size:12px;font-weight:bold;"
+                f"color:{C_RED};font-size:12px;background:transparent;"
             )
             self.endpoint_lbl.setText("Endpoint: — (start storage server)")
             if not binaries:
@@ -697,7 +926,3 @@ class FilesTab(QWidget):
         self._workers.append(w)
         self._workers = [x for x in self._workers if x.isRunning()]
         return w
-
-
-# Need QApplication for clipboard in CredentialsDialog
-from PyQt6.QtWidgets import QApplication

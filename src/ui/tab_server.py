@@ -97,20 +97,7 @@ class ServerTab(QWidget):
 
         title_row = QHBoxLayout()
         title_row.setSpacing(12)
-        self._title = QLabel("Main Cluster")
-        self._title.setStyleSheet(
-            f"color:{C_TEXT};font-size:24px;font-weight:800;background:transparent;"
-        )
-        prod = QLabel("PRODUCTION")
-        prod.setStyleSheet(
-            f"color:{C_TEXT3};background:{C_SURFACE};border:1px solid {C_BORDER2};"
-            f"border-radius:4px;font-size:9px;font-weight:800;"
-            f"letter-spacing:1.5px;padding:3px 8px;"
-        )
-        title_row.addWidget(self._title)
-        title_row.addWidget(prod)
         title_row.addStretch()
-        col.addLayout(title_row)
 
         sub_row = QHBoxLayout()
         sub_row.setSpacing(6)
@@ -128,12 +115,8 @@ class ServerTab(QWidget):
         h.addLayout(col)
         h.addStretch()
 
-        svc = QLabel("⊙  SYSTEM TRAY ACTIVE")
-        svc.setStyleSheet(
-            f"color:{C_TEXT3};font-size:9px;font-weight:700;letter-spacing:1.5px;"
-            f"background:{C_SURFACE};border:1px solid {C_BORDER2};"
-            f"border-radius:5px;padding:5px 12px;"
-        )
+        svc = QLabel("")
+      
         h.addWidget(svc)
         return w
 

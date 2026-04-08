@@ -10,6 +10,7 @@ NAV = [
     ("server",    "Servers",   "▣"),
     ("activity",  "Activity",  "≋"),
     ("databases", "Databases", "⊞"),
+    ("apps",      "Apps",      "◉"),       # Phase 2
     ("browser",   "Explorer",  "◈"),
     ("files",     "Storage",   "☁"),
     ("settings",  "Settings",  "⚙"),
@@ -21,15 +22,12 @@ ADV_NAV = [
     ("ssl",       "SSL / TLS", "⊕"),
     ("service",   "Service",   "⬛"),
     ("network",   "Network",   "⬡"),
+    ("dns",       "DNS",       "⊘"),       # Phase 2
     ("log",       "Log",       "≡"),
 ]
 
 
 class _NavBtn(QWidget):
-    """
-    Nav row built as a plain QWidget — avoids QPushButton child-layout
-    clipping issues in PyQt6. No borders on any child widget.
-    """
     clicked = pyqtSignal()
 
     def __init__(self, nav_id: str, icon: str, label: str):
@@ -40,26 +38,21 @@ class _NavBtn(QWidget):
         self.setFixedHeight(40)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-
-        # No border on the widget itself — prevents stray lines
         self.setStyleSheet("border: none; outline: none;")
 
         row = QHBoxLayout(self)
         row.setContentsMargins(16, 0, 14, 0)
         row.setSpacing(10)
 
-        # Icon label — no border, no background
         self._icon_lbl = QLabel(icon)
         self._icon_lbl.setFixedWidth(18)
         self._icon_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        # Critical: transparent background stops Qt painting a box around it
         self._icon_lbl.setStyleSheet(
             f"color: {C_TEXT3}; font-size: 14px; "
             f"background: transparent; border: none;"
         )
         row.addWidget(self._icon_lbl)
 
-        # Text label — no border, no background
         self._text_lbl = QLabel(label)
         self._text_lbl.setAlignment(
             Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft
@@ -75,8 +68,6 @@ class _NavBtn(QWidget):
 
         self._apply(False)
 
-    # ── Styling ───────────────────────────────────────────────────────────────
-
     def _apply(self, on: bool):
         self._active = on
         self.setAutoFillBackground(on)
@@ -85,9 +76,6 @@ class _NavBtn(QWidget):
             p = self.palette()
             p.setColor(self.backgroundRole(), QColor(C_SURFACE))
             self.setPalette(p)
-
-            # Left accent — painted via stylesheet on self only when active,
-            # using padding-left to fake the indent so no extra widget is needed
             self.setStyleSheet(
                 f"border: none; outline: none; "
                 f"border-left: 3px solid {C_BLUE};"
@@ -114,8 +102,6 @@ class _NavBtn(QWidget):
     def set_active(self, on: bool):
         self._apply(on)
 
-    # ── Mouse ─────────────────────────────────────────────────────────────────
-
     def mousePressEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton:
             self.clicked.emit()
@@ -141,8 +127,6 @@ class Sidebar(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setFixedWidth(SIDEBAR_W)
-
-        # Only a right border on the sidebar container — NOT on any child
         self.setStyleSheet(
             f"Sidebar {{ "
             f"  background: {C_BG}; "
@@ -156,7 +140,6 @@ class Sidebar(QWidget):
 
         root.addWidget(self._logo())
 
-        # ── Nav area ──────────────────────────────────────────────────────────
         nav_area = QWidget()
         nav_area.setStyleSheet("background: transparent; border: none;")
         nv = QVBoxLayout(nav_area)
@@ -171,7 +154,6 @@ class Sidebar(QWidget):
             self._btns[nav_id] = btn
             nv.addWidget(btn)
 
-        # ── Separator — plain 1px widget, no border style ─────────────────────
         nv.addSpacing(8)
         sep_wrap = QWidget()
         sep_wrap.setStyleSheet("background: transparent; border: none;")
@@ -197,16 +179,11 @@ class Sidebar(QWidget):
 
         self._select("server")
 
-    # ── Logo ──────────────────────────────────────────────────────────────────
     def _logo(self):
         w = QWidget()
         w.setFixedHeight(64)
-        # border-bottom only on logo — scoped so it doesn't bleed to children
-        w.setStyleSheet(
-            f"QWidget {{ background: {C_BG}; border: none; }}"
-        )
+        w.setStyleSheet(f"QWidget {{ background: {C_BG}; border: none; }}")
 
-        # Manual bottom border via a 1px widget
         outer = QVBoxLayout(w)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
@@ -223,11 +200,8 @@ class Sidebar(QWidget):
         box.setStyleSheet(
             "background: qlineargradient(x1:0,y1:0,x2:1,y2:1,"
             "stop:0 #4f8ef7, stop:1 #2563eb);"
-            "border-radius: 8px;"
-            "color: white;"
-            "font-size: 13px;"
-            "font-weight: 900;"
-            "border: none;"
+            "border-radius: 8px; color: white;"
+            "font-size: 13px; font-weight: 900; border: none;"
         )
 
         col = QVBoxLayout()
@@ -239,7 +213,7 @@ class Sidebar(QWidget):
             f"color: {C_TEXT}; font-size: 14px; font-weight: 700; "
             f"background: transparent; border: none;"
         )
-        ver = QLabel("V1.2.0 ORCHESTRATOR")
+        ver = QLabel("V2.0.0 ORCHESTRATOR")
         ver.setStyleSheet(
             f"color: {C_TEXT3}; font-size: 9px; font-weight: 700; "
             f"letter-spacing: 1.5px; background: transparent; border: none;"
@@ -251,15 +225,12 @@ class Sidebar(QWidget):
         h.addLayout(col)
         outer.addWidget(inner)
 
-        # Bottom divider as a widget, not a border
         divider = QWidget()
         divider.setFixedHeight(1)
         divider.setStyleSheet(f"background: {C_BORDER}; border: none;")
         outer.addWidget(divider)
-
         return w
 
-    # ── Bottom ────────────────────────────────────────────────────────────────
     def _bottom(self):
         w = QWidget()
         w.setStyleSheet(f"background: {C_BG}; border: none;")
@@ -267,7 +238,6 @@ class Sidebar(QWidget):
         v.setContentsMargins(14, 12, 14, 16)
         v.setSpacing(4)
 
-        # Top divider as widget
         divider = QWidget()
         divider.setFixedHeight(1)
         divider.setStyleSheet(f"background: {C_BORDER}; border: none;")
@@ -289,7 +259,6 @@ class Sidebar(QWidget):
             v.addWidget(btn)
 
         v.addSpacing(4)
-
         new_btn = QPushButton("  + New Instance")
         new_btn.setFixedHeight(38)
         new_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -304,15 +273,10 @@ class Sidebar(QWidget):
             "  background: qlineargradient(x1:0,y1:0,x2:1,y2:0,"
             "  stop:0 #3b7de8, stop:1 #6d28d9);"
             "}"
-            "QPushButton:pressed {"
-            "  background: qlineargradient(x1:0,y1:0,x2:1,y2:0,"
-            "  stop:0 #2a6dd9, stop:1 #5b21b6);"
-            "}"
         )
         v.addWidget(new_btn)
         return w
 
-    # ── Selection — public API unchanged ──────────────────────────────────────
     def _select(self, nav_id: str):
         for nid, btn in self._btns.items():
             btn.set_active(nid == nav_id)
