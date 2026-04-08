@@ -194,8 +194,8 @@ class ChangePwDialog(QDialog):
 
 class _DbRow(QWidget):
     """
-    A single database row matching the mockup:
-    [● name] [owner] [••• password] [conn string box + copy] [Change Password] [Drop]
+    Single database row.
+    [● name] [owner] [•••] [conn string + copy] [Change PW] [Drop]
     """
     change_pw_clicked = pyqtSignal(str)
     drop_clicked      = pyqtSignal(str)
@@ -203,102 +203,124 @@ class _DbRow(QWidget):
     def __init__(self, name, owner, conn_str, parent=None):
         super().__init__(parent)
         self._name = name
+        # Use object name selector so border only applies to THIS widget, not children
+        self.setObjectName("dbRow")
         self.setStyleSheet(
-            f"background:{C_SURFACE};border-bottom:1px solid {C_BORDER};"
+            "QWidget#dbRow {"
+            f"  background:{C_SURFACE};"
+            f"  border-bottom:1px solid {C_BORDER};"
+            "}"
         )
+        self.setFixedHeight(56)
 
         row = QHBoxLayout(self)
-        row.setContentsMargins(20, 0, 16, 0)
+        row.setContentsMargins(20, 0, 12, 0)
         row.setSpacing(0)
 
-        # ● name
+        # ── ● Name ─────────────────────────────────────────────────────────
         dot = QLabel("●")
-        dot.setStyleSheet(f"color:{C_GREEN};font-size:10px;background:transparent;margin-right:8px;")
-        name_lbl = QLabel(name)
-        name_lbl.setStyleSheet(
-            f"color:{C_BLUE};font-size:13px;font-weight:700;"
-            f"font-family:'Consolas','Courier New',monospace;background:transparent;"
-        )
-        name_lbl.setFixedWidth(200)
+        dot.setFixedWidth(16)
+        dot.setStyleSheet(f"color:{C_GREEN};font-size:8px;")
         row.addWidget(dot)
+
+        name_lbl = QLabel(name)
+        name_lbl.setFixedWidth(195)
+        name_lbl.setStyleSheet(
+            f"color:{C_TEXT};font-size:13px;font-weight:700;"
+            f"font-family:'Consolas','Courier New',monospace;"
+        )
         row.addWidget(name_lbl)
 
-        # owner
+        # ── Owner ───────────────────────────────────────────────────────────
         owner_lbl = QLabel(owner)
+        owner_lbl.setFixedWidth(148)
         owner_lbl.setStyleSheet(
-            f"color:{C_TEXT2};font-size:12px;background:transparent;"
+            f"color:{C_TEXT2};font-size:12px;"
+            f"font-family:'Consolas','Courier New',monospace;"
         )
-        owner_lbl.setFixedWidth(150)
         row.addWidget(owner_lbl)
 
-        # password dots
-        pw_lbl = QLabel("• " * 10)
+        # ── Password dots ───────────────────────────────────────────────────
+        pw_lbl = QLabel("● ● ● ● ● ● ●")
+        pw_lbl.setFixedWidth(120)
         pw_lbl.setStyleSheet(
-            f"color:{C_TEXT3};font-size:11px;letter-spacing:2px;background:transparent;"
+            f"color:{C_BORDER2};font-size:7px;letter-spacing:3px;"
         )
-        pw_lbl.setFixedWidth(160)
         row.addWidget(pw_lbl)
 
-        # connection string box with copy
+        # ── Connection string box ───────────────────────────────────────────
         conn_box = QWidget()
-        conn_box.setFixedWidth(260)
+        conn_box.setFixedWidth(268)
+        conn_box.setObjectName("connBox")
         conn_box.setStyleSheet(
-            f"background:{C_SURFACE2};border:1px solid {C_BORDER};"
-            f"border-radius:6px;"
+            "QWidget#connBox {"
+            f"  background:{C_BG};"
+            f"  border:1px solid {C_BORDER};"
+            f"  border-radius:6px;"
+            "}"
         )
         cb = QHBoxLayout(conn_box)
         cb.setContentsMargins(10, 0, 4, 0)
         cb.setSpacing(4)
-        short_conn = conn_str[:28] + "..." if len(conn_str) > 28 else conn_str
+
+        short_conn = conn_str[:30] + "…" if len(conn_str) > 30 else conn_str
         conn_lbl = QLabel(short_conn)
+        conn_lbl.setToolTip(conn_str)
         conn_lbl.setStyleSheet(
-            f"color:{C_TEXT2};font-size:11px;"
-            f"font-family:'Consolas','Courier New',monospace;background:transparent;"
+            f"color:{C_TEXT3};font-size:11px;"
+            f"font-family:'Consolas','Courier New',monospace;"
         )
+
         copy_btn = QPushButton("⧉")
-        copy_btn.setFixedSize(24, 24)
+        copy_btn.setFixedSize(26, 26)
         copy_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        copy_btn.setToolTip("Copy connection string")
         copy_btn.setStyleSheet(
-            f"QPushButton{{background:transparent;color:{C_TEXT3};"
-            f"border:none;font-size:13px;}}"
-            f"QPushButton:hover{{color:{C_TEXT};}}"
+            f"QPushButton{{background:{C_SURFACE};color:{C_TEXT3};"
+            f"border:1px solid {C_BORDER2};border-radius:5px;font-size:12px;}}"
+            f"QPushButton:hover{{background:{C_BORDER2};color:{C_TEXT};}}"
         )
-        copy_btn.setToolTip(conn_str)
         copy_btn.clicked.connect(lambda: (
             QApplication.clipboard().setText(conn_str),
             copy_btn.setText("✓"),
             QTimer.singleShot(1200, lambda: copy_btn.setText("⧉"))
         ))
-        cb.addWidget(conn_lbl)
-        cb.addStretch()
-        cb.addWidget(copy_btn)
+        cb.addWidget(conn_lbl, 1)
+        cb.addWidget(copy_btn, 0)
         row.addWidget(conn_box)
 
         row.addStretch()
 
-        # Change Password button
-        chpw = QPushButton("Change\nPassword")
-        chpw.setFixedSize(80, 44)
+        # ── Change Password ─────────────────────────────────────────────────
+        chpw = QPushButton("Change PW")
+        chpw.setFixedHeight(30)
         chpw.setCursor(Qt.CursorShape.PointingHandCursor)
         chpw.setStyleSheet(
-            f"QPushButton{{background:transparent;color:{C_BLUE};"
-            f"border:none;font-size:11px;font-weight:600;text-align:center;}}"
-            f"QPushButton:hover{{color:#93c5fd;}}"
+            f"QPushButton{{background:{C_SURFACE2};color:{C_TEXT3};"
+            f"border:1px solid {C_BORDER2};border-radius:6px;"
+            f"font-size:11px;font-weight:600;padding:0 12px;}}"
+            f"QPushButton:hover{{background:{C_BLUE}22;color:{C_BLUE};"
+            f"border-color:{C_BLUE}66;}}"
         )
         chpw.clicked.connect(lambda: self.change_pw_clicked.emit(self._name))
+        row.addSpacing(8)
         row.addWidget(chpw)
 
-        # Drop button
-        drop = QPushButton("Drop")
-        drop.setFixedSize(50, 44)
-        drop.setCursor(Qt.CursorShape.PointingHandCursor)
-        drop.setStyleSheet(
-            f"QPushButton{{background:transparent;color:{C_RED};"
-            f"border:none;font-size:12px;font-weight:700;}}"
-            f"QPushButton:hover{{color:#f87171;}}"
+        # ── Drop ────────────────────────────────────────────────────────────
+        drop_btn = QPushButton("Drop")
+        drop_btn.setFixedHeight(30)
+        drop_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        drop_btn.setStyleSheet(
+            f"QPushButton{{background:{C_SURFACE2};color:{C_TEXT3};"
+            f"border:1px solid {C_BORDER2};border-radius:6px;"
+            f"font-size:11px;font-weight:600;padding:0 12px;}}"
+            f"QPushButton:hover{{background:{C_RED}22;color:{C_RED};"
+            f"border-color:{C_RED}66;}}"
         )
-        drop.clicked.connect(lambda: self.drop_clicked.emit(self._name))
-        row.addWidget(drop)
+        drop_btn.clicked.connect(lambda: self.drop_clicked.emit(self._name))
+        row.addSpacing(6)
+        row.addWidget(drop_btn)
+        row.addSpacing(4)
 
     def get_name(self):
         return self._name
@@ -946,9 +968,13 @@ class DatabasesTab(QWidget):
 
         # ── Databases table ────────────────────────────────────────────────────
         self._db_container = QWidget()
+        self._db_container.setObjectName("dbContainer")
         self._db_container.setStyleSheet(
-            f"background:{C_SURFACE};border:1px solid {C_BORDER};"
-            f"border-radius:10px;"
+            "QWidget#dbContainer {"
+            f"  background:{C_SURFACE};"
+            f"  border:1px solid {C_BORDER};"
+            f"  border-radius:10px;"
+            "}"
         )
         self._db_layout = QVBoxLayout(self._db_container)
         self._db_layout.setContentsMargins(0, 0, 0, 0)
@@ -957,18 +983,22 @@ class DatabasesTab(QWidget):
         self._db_header = self._build_table_header()
         self._db_layout.addWidget(self._db_header)
 
-        self._db_rows_container = QWidget()
-        self._db_rows_container.setStyleSheet("background:transparent;")
-        self._db_rows_layout = QVBoxLayout(self._db_rows_container)
-        self._db_rows_layout.setContentsMargins(0, 0, 0, 0)
-        self._db_rows_layout.setSpacing(0)
-
+        # Empty-state label lives directly in _db_layout — never in the rows container
+        # so it can never be hit by deleteLater() when rows are cleared.
         self._empty_lbl = QLabel("No databases yet. Click + New Database to create one.")
         self._empty_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._empty_lbl.setStyleSheet(
-            f"color:{C_TEXT3};font-size:12px;padding:32px;background:transparent;"
+            f"color:{C_TEXT3};font-size:12px;padding:40px;background:transparent;"
         )
-        self._db_rows_layout.addWidget(self._empty_lbl)
+        self._db_layout.addWidget(self._empty_lbl)
+
+        # Rows container is separate — hidden when empty
+        self._db_rows_container = QWidget()
+        self._db_rows_container.setStyleSheet("background:transparent;")
+        self._db_rows_container.setVisible(False)
+        self._db_rows_layout = QVBoxLayout(self._db_rows_container)
+        self._db_rows_layout.setContentsMargins(0, 0, 0, 0)
+        self._db_rows_layout.setSpacing(0)
         self._db_layout.addWidget(self._db_rows_container)
         bv.addWidget(self._db_container)
         bv.addSpacing(28)
@@ -977,8 +1007,7 @@ class DatabasesTab(QWidget):
         runner_container = QWidget()
         runner_container.setFixedHeight(560)
         runner_container.setStyleSheet(
-            f"background:{C_SURFACE};border:1px solid {C_BORDER};"
-            f"border-radius:10px;overflow:hidden;"
+            f"background:{C_SURFACE};border:0px solid {C_BORDER};"
         )
         rl = QVBoxLayout(runner_container)
         rl.setContentsMargins(0, 0, 0, 0)
@@ -996,26 +1025,34 @@ class DatabasesTab(QWidget):
 
     def _build_table_header(self):
         hdr = QWidget()
-        hdr.setFixedHeight(44)
+        hdr.setFixedHeight(38)
+        hdr.setObjectName("dbTableHeader")
         hdr.setStyleSheet(
-            f"background:{C_SURFACE2};border-bottom:1px solid {C_BORDER};"
-            f"border-radius:10px 10px 0 0;"
+            "QWidget#dbTableHeader {"
+            f"  background:{C_SURFACE2};"
+            f"  border-bottom:1px solid {C_BORDER};"
+            f"  border-radius:10px 10px 0 0;"
+            "}"
         )
         h = QHBoxLayout(hdr)
-        h.setContentsMargins(20, 0, 16, 0)
+        h.setContentsMargins(20, 0, 12, 0)
         h.setSpacing(0)
 
-        for text, width in [
-            ("DATABASE NAME", 210),
-            ("OWNER\nUSERNAME", 150),
-            ("PASSWORD", 160),
-            ("CONNECTION STRING", 270),
-            ("", 0),
-        ]:
+        # col widths must mirror _DbRow exactly:
+        # dot(16) + name(195) = 211 → label width 211
+        # owner 148, password 120, conn 268, then stretch for actions
+        cols = [
+            ("DATABASE NAME",     211),
+            ("OWNER",             148),
+            ("PASSWORD",          120),
+            ("CONNECTION STRING", 268),
+            ("",                    0),
+        ]
+        for text, width in cols:
             lbl = QLabel(text)
             lbl.setStyleSheet(
-                f"color:{C_TEXT3};font-size:10px;font-weight:700;"
-                f"letter-spacing:1.2px;background:transparent;"
+                f"color:{C_TEXT3};font-size:9px;font-weight:700;"
+                f"letter-spacing:1.5px;"
             )
             if width:
                 lbl.setFixedWidth(width)
@@ -1030,17 +1067,20 @@ class DatabasesTab(QWidget):
         ip   = manager.get_lan_ip()
         port = self.config["port"]
 
+        # Clear old rows — _empty_lbl is NOT in this layout so it's safe
         while self._db_rows_layout.count():
             child = self._db_rows_layout.takeAt(0)
             if child.widget():
                 child.widget().deleteLater()
 
         if not dbs:
-            self._db_rows_layout.addWidget(self._empty_lbl)
             self._empty_lbl.setVisible(True)
+            self._db_rows_container.setVisible(False)
             return
 
         self._empty_lbl.setVisible(False)
+        self._db_rows_container.setVisible(True)
+
         for db in dbs:
             name  = db["name"]
             owner = db["owner"]
@@ -1048,11 +1088,10 @@ class DatabasesTab(QWidget):
             row   = _DbRow(name, owner, conn)
             row.change_pw_clicked.connect(self._on_chpw)
             row.drop_clicked.connect(self._on_drop)
-            row.setFixedHeight(54)
+            row.setFixedHeight(56)
             self._db_rows_layout.addWidget(row)
 
-        if dbs:
-            self._sql_runner.set_db(dbs[0]["name"])
+        self._sql_runner.set_db(dbs[0]["name"])
 
     def refresh_databases(self, dbs):
         self.populate(dbs, self._manager)

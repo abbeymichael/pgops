@@ -1,3 +1,9 @@
+"""
+main_window.py  — Phase 2 edition
+Adds: DNS server, Caddy, FrankenPHP app manager, Apps tab, DNS tab,
+      internal API server, landing page server.
+"""
+
 import platform
 from pathlib import Path
 
@@ -17,11 +23,16 @@ from core.mdns import MDNSBroadcaster, verify_mdns_resolution
 from core.scheduler import BackupScheduler
 from core.service_manager import service_exists
 import core.db_manager as dbm
-from ui.table_browser import TableBrowser
-from ui.login_dialog import ChangePasswordDialog as ChangePwDialog
-from ui.files_tab import FilesTab
 from core.minio_manager import MinIOManager
 from core.pgadmin_manager import PgAdminManager
+
+# ── Phase 2 imports ───────────────────────────────────────────────────────────
+from core.dns_server import DNSServerThread
+from core.caddy_manager import CaddyManager
+from core.frankenphp_manager import AppProcessManager
+from core.app_manager import load_apps, save_apps, upsert_app
+from core.api_server import APIServer
+from core.landing_server import LandingServer
 
 from ui.tab_activity   import ActivityTab
 from ui.tab_server     import ServerTab
@@ -32,13 +43,19 @@ from ui.tab_settings   import SettingsTab
 from ui.tab_network    import NetworkTab
 from ui.tab_ssl        import SslTab
 from ui.tab_service    import ServiceTab
+from ui.tab_apps       import AppsTab        # Phase 2
+from ui.tab_dns        import DnsTab         # Phase 2
+from ui.files_tab      import FilesTab
 from ui.sidebar        import Sidebar
 from ui.header_bar     import HeaderBar
+from ui.login_dialog   import ChangePasswordDialog as ChangePwDialog
 from ui.theme import (
     APP_STYLE, C_SURFACE, C_SURFACE2, C_BORDER, C_BORDER2,
     C_TEXT, C_TEXT2, C_TEXT3, C_BLUE, C_GREEN, C_RED,
 )
 
+
+# ── Worker ────────────────────────────────────────────────────────────────────
 
 class Worker(QThread):
     done     = pyqtSignal(bool, str)
@@ -63,10 +80,26 @@ class Worker(QThread):
             self.done.emit(False, str(e))
 
 
+class _DbWorker(QThread):
+    result = pyqtSignal(object, str)
+
+    def __init__(self, fn):
+        super().__init__()
+        self.fn = fn
+
+    def run(self):
+        try:
+            self.result.emit(self.fn(), "")
+        except Exception as e:
+            self.result.emit(None, str(e))
+
+
+# ── Main Window ───────────────────────────────────────────────────────────────
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.config = load_config()
+        self.config  = load_config()
         self.manager = PostgresManager(self.config, log_callback=self._log)
         self._workers = []
         self._db_list = []
@@ -79,6 +112,30 @@ class MainWindow(QMainWindow):
         self.mdns    = MDNSBroadcaster(port=self.config["port"], log_fn=self._log)
         self.minio   = MinIOManager(self.config, log_fn=self._log)
         self.pgadmin = PgAdminManager(self.config, log_fn=self._log)
+
+        # ── Phase 2 components ─────────────────────────────────────────────────
+        self.dns_server = DNSServerThread(
+            host_ip=self.manager.get_lan_ip(), log_fn=self._log
+        )
+        self.caddy = CaddyManager(self.config, log_fn=self._log)
+        self.app_procs = AppProcessManager(log_fn=self._log)
+
+        self.landing_server = LandingServer(
+            get_apps=load_apps,
+            get_host_ip=self.manager.get_lan_ip,
+            log_fn=self._log,
+        )
+
+        self.api_server = APIServer(
+            app_registry_fn=load_apps,
+            process_manager=self.app_procs,
+            postgres_manager=self.manager,
+            minio_manager=self.minio,
+            caddy_manager=self.caddy,
+            admin_config=self.config,
+            log_fn=self._log,
+        )
+        # ──────────────────────────────────────────────────────────────────────
 
         self.setWindowTitle("PGOps")
         self.setMinimumSize(1060, 700)
@@ -100,12 +157,51 @@ class MainWindow(QMainWindow):
         if self.scheduler.schedule.get("enabled"):
             self.scheduler.start()
 
-        QTimer.singleShot(500, self._auto_start_mdns)
+        # Staggered Phase 2 startup
+        QTimer.singleShot(500,  self._auto_start_mdns)
+        QTimer.singleShot(600,  self._start_dns)
+        QTimer.singleShot(700,  self._start_landing_server)
+        QTimer.singleShot(800,  self._start_api_server)
+        QTimer.singleShot(2000, self._start_caddy_and_apps)
+
+    # ── Startup helpers ───────────────────────────────────────────────────────
+
+    def _start_dns(self):
+        ok, msg = self.dns_server.start()
+        self._log(msg)
+        if hasattr(self, "_dns_tab"):
+            self._dns_tab.refresh()
+
+    def _start_landing_server(self):
+        ok, msg = self.landing_server.start()
+        self._log(msg)
+
+    def _start_api_server(self):
+        ok, msg = self.api_server.start()
+        self._log(msg)
+
+    def _start_caddy_and_apps(self):
+        """Start Caddy and all 'running' apps from the registry."""
+        apps = load_apps()
+        running_apps = [a for a in apps if a.get("status") == "running"]
+
+        if running_apps and not self.app_procs.is_running(running_apps[0]["id"]):
+            results = self.app_procs.start_all(running_apps)
+            for app_id, ok, msg in results:
+                self._log(f"[App:{app_id}] {msg}")
+
+        if self.caddy.is_available():
+            ok, msg = self.caddy.start(apps)
+            self._log(msg)
+        else:
+            self._log("[Caddy] Binary not found — skipping. Click Setup in Apps tab.")
 
     def _initial_load(self):
         self._poll()
         if self.manager.is_running():
             self._load_databases_async()
+
+    # ── UI build ──────────────────────────────────────────────────────────────
 
     def _build_ui(self):
         root = QWidget()
@@ -161,6 +257,14 @@ class MainWindow(QMainWindow):
         )
         self._add_page("databases", self._db_tab)
 
+        # ── Phase 2: Apps Tab ──────────────────────────────────────────────────
+        self._apps_tab = AppsTab(
+            config=self.config,
+            process_manager=self.app_procs,
+            caddy_manager=self.caddy,
+        )
+        self._add_page("apps", self._apps_tab)
+
         self.files_tab = FilesTab(self.minio)
         self._add_page("files", self.files_tab)
 
@@ -215,6 +319,14 @@ class MainWindow(QMainWindow):
         )
         self._add_page("network", self._net_tab)
 
+        # ── Phase 2: DNS Tab ───────────────────────────────────────────────────
+        self._dns_tab = DnsTab(
+            dns_server=self.dns_server,
+            get_host_ip=self.manager.get_lan_ip,
+            on_log=self._log,
+        )
+        self._add_page("dns", self._dns_tab)
+
         self._add_page("log", self._tab_log())
 
     def _tab_log(self):
@@ -244,12 +356,15 @@ class MainWindow(QMainWindow):
         v.addWidget(clr)
         return w
 
+    # ── Navigation ────────────────────────────────────────────────────────────
+
     def _on_nav(self, key):
         self._stack.setCurrentIndex(self._page_idx.get(key, 0))
         TITLES = {
             "server":    ("THE COMMAND CONSOLE", "PGOps Orchestrator"),
             "activity":  ("THE COMMAND CONSOLE", "Activity Monitor"),
             "databases": ("THE COMMAND CONSOLE", "Databases"),
+            "apps":      ("THE COMMAND CONSOLE", "Web Applications"),   # Phase 2
             "files":     ("THE COMMAND CONSOLE", "Storage"),
             "backup":    ("THE COMMAND CONSOLE", "Backup & Restore"),
             "schedule":  ("THE COMMAND CONSOLE", "Schedule"),
@@ -257,19 +372,28 @@ class MainWindow(QMainWindow):
             "service":   ("THE COMMAND CONSOLE", "Service"),
             "settings":  ("THE COMMAND CONSOLE", "Settings"),
             "network":   ("THE COMMAND CONSOLE", "Network"),
+            "dns":       ("THE COMMAND CONSOLE", "DNS Server"),          # Phase 2
             "log":       ("THE COMMAND CONSOLE", "Log"),
         }
         sec, pg = TITLES.get(key, ("THE COMMAND CONSOLE", ""))
         self._hbar.set_title(sec, pg)
+
         if key == "activity":
             if self.manager.is_running():
                 self.activity.start_monitoring()
         else:
             self.activity.stop_monitoring()
+
         if key == "service":
             self._svc_tab.update_status()
         if key == "ssl":
             self._ssl_tab.refresh_status()
+        if key == "dns":
+            self._dns_tab.refresh()
+        if key == "apps":
+            self._apps_tab.refresh()
+
+    # ── Tray ──────────────────────────────────────────────────────────────────
 
     def _build_tray(self):
         px = QPixmap(16, 16)
@@ -291,18 +415,29 @@ class MainWindow(QMainWindow):
     def closeEvent(self, e):
         e.ignore()
         self.hide()
-        self.tray.showMessage("PGOps", "Running in system tray.", QSystemTrayIcon.MessageIcon.Information, 2000)
+        self.tray.showMessage(
+            "PGOps", "Running in system tray.",
+            QSystemTrayIcon.MessageIcon.Information, 2000
+        )
 
     def _quit(self):
         self.scheduler.stop()
         self.mdns.stop()
-        if self.minio.is_running():
-            self.minio.stop()
-        if self.pgadmin.is_running():
-            self.pgadmin.stop()
+
+        # Phase 2 shutdown (reverse startup order)
+        self.app_procs.stop_all()
+        self.caddy.stop()
+        self.api_server.stop()
+        self.landing_server.stop()
+        self.dns_server.stop()
+
+        if self.minio.is_running():    self.minio.stop()
+        if self.pgadmin.is_running():  self.pgadmin.stop()
         if self.manager.is_running() and not service_exists():
             self.manager.stop()
         QApplication.quit()
+
+    # ── PostgreSQL controls ───────────────────────────────────────────────────
 
     def _start(self):
         if not self.manager.is_binaries_available():
@@ -327,11 +462,14 @@ class MainWindow(QMainWindow):
                 self._run(_spa, lambda ok, msg: (
                     self._log(f"[pgAdmin] {msg}"), self._update_pgadmin_status()
                 ))
+            # Start Caddy + apps if not already running
+            if not self.caddy.is_running():
+                QTimer.singleShot(500, self._start_caddy_and_apps)
 
     def _stop(self):
         self._srv_tab.btn_stop.setEnabled(False)
-        if self.minio.is_running():   self.minio.stop()
-        if self.pgadmin.is_running(): self.pgadmin.stop()
+        if self.minio.is_running():    self.minio.stop()
+        if self.pgadmin.is_running():  self.pgadmin.stop()
         def fn(_p): return self.manager.stop(), ""
         self._run(fn, lambda ok, msg: (self._srv_tab.btn_stop.setEnabled(True), self._poll()))
 
@@ -350,6 +488,8 @@ class MainWindow(QMainWindow):
             self._log("Setup complete. Click Start Server.")
         else:
             self._log(f"Setup failed: {msg}")
+
+    # ── Database operations ───────────────────────────────────────────────────
 
     def _load_databases_async(self):
         if not self.manager.is_running():
@@ -391,7 +531,8 @@ class MainWindow(QMainWindow):
         self._run(fn, done)
 
     def _drop_database(self, dbname):
-        if QMessageBox.question(self, "Drop Database",
+        if QMessageBox.question(
+            self, "Drop Database",
             f"Permanently delete '{dbname}'?\n\nThis cannot be undone.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         ) != QMessageBox.StandardButton.Yes: return
@@ -417,6 +558,8 @@ class MainWindow(QMainWindow):
             )
         self._run(fn, lambda ok, msg: self._log(msg))
 
+    # ── Schedule ──────────────────────────────────────────────────────────────
+
     def _save_schedule(self, schedule_dict):
         self.scheduler.update(**schedule_dict)
         self._sched_tab.refresh_next_run()
@@ -427,12 +570,16 @@ class MainWindow(QMainWindow):
             dbname, self.config["username"], self.config["password"], self.config["port"]
         )
 
+    # ── Settings ──────────────────────────────────────────────────────────────
+
     def _save_settings(self, new_cfg):
         self.config.update(new_cfg)
         save_config(self.config)
         self.manager.config    = self.config
         self.minio.config      = self.config
         self.pgadmin.pg_config = self.config
+        self.caddy.config      = self.config      # Phase 2
+        self.api_server._cfg   = self.config      # Phase 2
         self.activity.update_config(self.config)
         self._db_tab.update_config(self.config)
         self._backup_tab.update_config(self.config)
@@ -442,13 +589,15 @@ class MainWindow(QMainWindow):
     def _change_app_password(self):
         dlg = ChangePwDialog(self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
-            QMessageBox.information(self, "Password Changed", "Master password updated successfully.")
+            QMessageBox.information(self, "Password Changed", "Master password updated.")
             self._log("App password changed.")
+
+    # ── pgAdmin ───────────────────────────────────────────────────────────────
 
     def _start_pgadmin(self):
         if not self.pgadmin.is_available():
             QMessageBox.warning(self, "Not Available",
-                "pgAdmin 4 not found in PostgreSQL bundle. Run Setup PostgreSQL first."); return
+                "pgAdmin 4 not found. Run Setup PostgreSQL first."); return
         self._srv_tab.btn_pga_start.setEnabled(False)
         def fn(_p): return self.pgadmin.start()
         def done(ok, msg):
@@ -468,26 +617,22 @@ class MainWindow(QMainWindow):
     def _open_pgadmin(self):
         if not self.pgadmin.is_running():
             QMessageBox.information(self, "pgAdmin Not Running",
-                "Start pgAdmin first using the Start pgAdmin button."); return
+                "Start pgAdmin first."); return
         import webbrowser; webbrowser.open(self.pgadmin.url())
 
     def _reset_pgadmin(self):
         reply = QMessageBox.question(
             self, "Reset pgAdmin",
-            "This will stop pgAdmin, delete its database, and restart it fresh.\n\n"
-            "All pgAdmin settings (saved connections, preferences) will be lost.\n"
-            "Your PostgreSQL databases and data are NOT affected.\n\n"
-            "After reset, log in with:\n"
+            "Stop pgAdmin, delete its database, and restart fresh?\n\n"
+            "Log in after reset with:\n"
             "  Email:    admin@pgops.com\n"
-            "  Password: pgopsadmin\n\n"
-            "Continue?",
+            "  Password: pgopsadmin",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
         if reply != QMessageBox.StandardButton.Yes: return
         self._srv_tab.btn_pga_reset.setEnabled(False)
         self._srv_tab.btn_pga_start.setEnabled(False)
-        self._log("[pgAdmin] Resetting and restarting…")
         def fn(_p): return self.pgadmin.reset_and_restart()
         def done(ok, msg):
             self._srv_tab.btn_pga_reset.setEnabled(True)
@@ -500,6 +645,8 @@ class MainWindow(QMainWindow):
 
     def _update_pgadmin_status(self):
         self._srv_tab.update_pgadmin_status(self.pgadmin.is_running(), self.pgadmin.is_available())
+
+    # ── mDNS ──────────────────────────────────────────────────────────────────
 
     def _auto_start_mdns(self):
         ok, msg = self.mdns.start()
@@ -514,10 +661,10 @@ class MainWindow(QMainWindow):
     def _stop_mdns(self):
         reply = QMessageBox.question(
             self, "Stop Broadcasting",
-            "pgops.local is the hostname all your apps use for connections.\n"
-            "Stopping it will make pgops.local unreachable.\n\nAre you sure?",
+            "pgops.local is the hostname all apps use.\n"
+            "Stopping it will make pgops.local unreachable.\n\nContinue?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No
+            QMessageBox.StandardButton.No,
         )
         if reply != QMessageBox.StandardButton.Yes: return
         ok, msg = self.mdns.stop()
@@ -530,14 +677,18 @@ class MainWindow(QMainWindow):
         self._net_tab.update_mdns_status(ok, self.manager.get_lan_ip() if ok else "")
 
     def _update_mdns_status(self):
-        if hasattr(self, '_net_tab'):
+        if hasattr(self, "_net_tab"):
             ip = self.manager.get_lan_ip() if self.mdns.is_running() else ""
             self._net_tab.update_mdns_status(self.mdns.is_running(), ip)
+
+    # ── Network / IP pinning ──────────────────────────────────────────────────
 
     def _pin_ip(self, ip):
         self.config["preferred_ip"] = ip
         save_config(self.config)
         self.manager.config = self.config
+        # Also update DNS server with new IP
+        self.dns_server.update_ip(ip)
         self._log(f"Pinned host IP: {ip}")
         self._poll()
 
@@ -545,8 +696,10 @@ class MainWindow(QMainWindow):
         self.config["preferred_ip"] = ""
         save_config(self.config)
         self.manager.config = self.config
-        self._log("IP pin removed -- auto-detect enabled.")
+        self._log("IP pin removed — auto-detect enabled.")
         self._poll()
+
+    # ── Poll (3s timer) ───────────────────────────────────────────────────────
 
     def _poll(self):
         running = self.manager.is_running()
@@ -560,21 +713,31 @@ class MainWindow(QMainWindow):
         )
         if not self.manager.is_binaries_available():
             self._srv_tab.show_warn(True)
-        if hasattr(self, '_svc_tab'):
+        if hasattr(self, "_svc_tab"):
             self._svc_tab.update_status()
         self._update_mdns_status()
         self._update_pgadmin_status()
-        if hasattr(self, '_sched_tab'):
+        if hasattr(self, "_sched_tab"):
             self._sched_tab.refresh_next_run()
+        # Keep DNS IP in sync with current LAN IP
+        current_ip = self.manager.get_lan_ip()
+        if self.dns_server.host_ip != current_ip:
+            self.dns_server.update_ip(current_ip)
+            if hasattr(self, "_dns_tab"):
+                self._dns_tab.refresh()
+
+    # ── Logging ───────────────────────────────────────────────────────────────
 
     def _log(self, msg):
-        if hasattr(self, 'log_box'):
+        if hasattr(self, "log_box"):
             self.log_box.append(str(msg))
             self.log_box.verticalScrollBar().setValue(
                 self.log_box.verticalScrollBar().maximum()
             )
-        if hasattr(self, '_srv_tab'):
+        if hasattr(self, "_srv_tab"):
             self._srv_tab.append_log(str(msg))
+
+    # ── Worker helper ─────────────────────────────────────────────────────────
 
     def _run(self, fn, on_done) -> Worker:
         w = Worker(fn)
@@ -583,17 +746,3 @@ class MainWindow(QMainWindow):
         self._workers.append(w)
         self._workers = [x for x in self._workers if x.isRunning()]
         return w
-
-
-class _DbWorker(QThread):
-    result = pyqtSignal(object, str)
-
-    def __init__(self, fn):
-        super().__init__()
-        self.fn = fn
-
-    def run(self):
-        try:
-            self.result.emit(self.fn(), "")
-        except Exception as e:
-            self.result.emit(None, str(e))
