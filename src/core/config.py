@@ -5,11 +5,6 @@ from pathlib import Path
 
 
 def get_app_data_dir() -> Path:
-    """
-    User-writable config directory — same location as pg_manager uses.
-      Windows : %LOCALAPPDATA%/PGOps
-      macOS   : ~/Library/Application Support/PGOps
-    """
     if platform.system() == "Windows":
         base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
     elif platform.system() == "Darwin":
@@ -25,14 +20,15 @@ def get_app_data_dir() -> Path:
 CONFIG_FILE = get_app_data_dir() / "config.json"
 
 DEFAULT_CONFIG = {
-    "username": "postgres",
-    "password": "postgres",
-    "database": "mydb",
-    "port": 5432,
-    "autostart": False,
-    "preferred_ip": "",
-    "caddy_http_port": 8088,  # ← use non-privileged port instead of 80
-    "landing_port": 8080,
+    "username":         "postgres",
+    "password":         "postgres",
+    "database":         "mydb",
+    "port":             5432,
+    "autostart":        False,
+    "preferred_ip":     "",
+    "caddy_http_port":  80,
+    "caddy_https_port": 443,
+    "landing_port":     8080,
 }
 
 

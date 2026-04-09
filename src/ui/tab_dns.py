@@ -1,30 +1,39 @@
 """
 tab_dns.py
-DNS Tab — shows DNS server status, client setup instructions, QR code.
+DNS Tab — unified DNS resolution management for pgops.test.
+
+Two resolution strategies:
+  1. Hosts File Injection  — reliable for local machine, zero network config
+  2. DNS Server            — serves all LAN devices if port 53 is available
+
+The tab makes it crystal clear which method is active and guides the user.
 """
 
 import webbrowser
+import platform
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QFrame, QScrollArea, QTabWidget, QTextEdit, QApplication,
+    QMessageBox,
 )
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QPixmap, QImage
 
 from ui.theme import (
     C_BG, C_SURFACE, C_SURFACE2, C_BORDER, C_BORDER2,
-    C_TEXT, C_TEXT2, C_TEXT3, C_BLUE, C_GREEN, C_RED,
+    C_TEXT, C_TEXT2, C_TEXT3, C_BLUE, C_GREEN, C_RED, C_AMBER,
 )
 
 
-def _btn(text, bg=C_BLUE, hover="#3b7de8", fg="white", h=32):
+def _btn(text, bg=C_BLUE, hover="#3b7de8", fg="white", h=34):
     b = QPushButton(text)
     b.setFixedHeight(h)
     b.setCursor(Qt.CursorShape.PointingHandCursor)
     b.setStyleSheet(
         f"QPushButton{{background:{bg};color:{fg};border:none;"
-        f"border-radius:6px;padding:0 14px;font-size:12px;font-weight:700;}}"
+        f"border-radius:6px;padding:0 16px;font-size:12px;font-weight:700;}}"
         f"QPushButton:hover{{background:{hover};}}"
+        f"QPushButton:disabled{{background:{C_BORDER};color:{C_TEXT3};}}"
     )
     return b
 
@@ -46,31 +55,20 @@ def _sep():
     return f
 
 
-def _copy_btn(value: str) -> QPushButton:
-    b = QPushButton("Copy")
-    b.setFixedSize(52, 28)
-    b.setCursor(Qt.CursorShape.PointingHandCursor)
-    b.setStyleSheet(
-        f"QPushButton{{background:{C_SURFACE2};color:{C_TEXT3};"
-        f"border:1px solid {C_BORDER2};border-radius:5px;"
-        f"font-size:11px;font-weight:600;}}"
-        f"QPushButton:hover{{background:{C_BORDER2};color:{C_TEXT};}}"
+def _status_pill(text, fg, bg):
+    l = QLabel(text)
+    l.setStyleSheet(
+        f"color:{fg};background:{bg};border:1px solid {fg}44;"
+        f"border-radius:4px;font-size:10px;font-weight:800;"
+        f"letter-spacing:1px;padding:3px 10px;"
     )
-    def _do():
-        QApplication.clipboard().setText(value)
-        b.setText("✓")
-        QTimer.singleShot(1300, lambda: b.setText("Copy"))
-    b.clicked.connect(_do)
-    return b
+    return l
 
 
-def _make_qr_pixmap(url: str, size: int = 200) -> QPixmap:
-    """Generate a QR code pixmap for the given URL. Returns None on failure."""
+def _make_qr_pixmap(url: str, size: int = 180) -> QPixmap:
     try:
         import qrcode
-        from PIL import Image
         import io
-
         qr = qrcode.make(url)
         buf = io.BytesIO()
         qr.save(buf, format="PNG")
@@ -87,10 +85,8 @@ def _make_qr_pixmap(url: str, size: int = 200) -> QPixmap:
 
 class DnsTab(QWidget):
     """
-    DNS Tab — status card, client setup instructions, QR code.
-    dns_server: DNSServerThread instance
-    get_host_ip: callable returning current LAN IP string
-    on_log: callable for logging
+    DNS / Resolution management tab.
+    Provides both hosts-file injection (local) and DNS server (LAN-wide).
     """
 
     def __init__(self, dns_server, get_host_ip, on_log=None, parent=None):
@@ -99,9 +95,9 @@ class DnsTab(QWidget):
         self._get_ip    = get_host_ip
         self._on_log    = on_log or print
         self._build()
-        QTimer.singleShot(300, self._refresh_status)
+        QTimer.singleShot(400, self.refresh)
 
-    # ── Build ─────────────────────────────────────────────────────────────────
+    # ── Build ──────────────────────────────────────────────────────────────────
 
     def _build(self):
         outer = QVBoxLayout(self)
@@ -117,80 +113,214 @@ class DnsTab(QWidget):
         inner.setStyleSheet("background:#1a1d23;")
         v = QVBoxLayout(inner)
         v.setContentsMargins(28, 28, 28, 28)
-        v.setSpacing(20)
+        v.setSpacing(18)
 
-        v.addWidget(_lbl("DNS Server", C_TEXT, 22, bold=True))
+        # Page header
+        v.addWidget(_lbl("DNS & Host Resolution", C_TEXT, 22, bold=True))
         v.addWidget(_lbl(
-            "PGOps runs a local DNS server so every device resolves *.pgops.test automatically.",
+            "Make pgops.test and *.pgops.test resolve to this machine on any device.",
             C_TEXT3, 12
         ))
 
-        v.addWidget(self._status_card())
-        v.addWidget(self._instructions_card())
-        v.addWidget(self._qr_card())
-        v.addStretch()
+        # Current status banner
+        v.addWidget(self._status_banner())
 
+        # Method 1: Hosts File (local machine)
+        v.addWidget(self._hosts_card())
+
+        # Method 2: DNS Server (LAN-wide)
+        v.addWidget(self._dns_server_card())
+
+        # LAN device setup instructions
+        v.addWidget(self._instructions_card())
+
+        # QR code
+        v.addWidget(self._qr_card())
+
+        v.addStretch()
         scroll.setWidget(inner)
         outer.addWidget(scroll)
 
-    # ── Status card ───────────────────────────────────────────────────────────
+    # ── Status banner ─────────────────────────────────────────────────────────
 
-    def _status_card(self):
-        card = self._card("DNS Server Status")
-        cv = card.layout()
-
-        self._status_lbl = QLabel("Checking...")
-        self._status_lbl.setStyleSheet(
-            f"color:{C_TEXT2};font-size:15px;font-weight:700;background:transparent;"
+    def _status_banner(self):
+        w = QWidget()
+        w.setStyleSheet(
+            f"background:{C_SURFACE};border:1px solid {C_BORDER};border-radius:10px;"
         )
-        cv.addWidget(self._status_lbl)
+        h = QHBoxLayout(w)
+        h.setContentsMargins(20, 14, 20, 14)
+        h.setSpacing(16)
 
-        # IP row
-        ip_row = QHBoxLayout()
-        ip_row.setSpacing(10)
-        ip_label = _lbl("CURRENT HOST IP", C_TEXT3, 10)
-        ip_label.setFixedWidth(130)
-        self._ip_lbl = QLabel("—")
-        self._ip_lbl.setStyleSheet(
+        # Hosts status
+        hosts_col = QVBoxLayout()
+        hosts_col.setSpacing(4)
+        hl = _lbl("LOCAL MACHINE", C_TEXT3, 9, bold=True)
+        hl.setStyleSheet(
+            f"color:{C_TEXT3};font-size:9px;font-weight:700;letter-spacing:1.5px;background:transparent;"
+        )
+        self._hosts_status_pill = QLabel("CHECKING...")
+        self._hosts_status_pill.setStyleSheet(
+            f"color:{C_TEXT3};font-size:12px;font-weight:700;background:transparent;"
+        )
+        hosts_col.addWidget(hl)
+        hosts_col.addWidget(self._hosts_status_pill)
+        h.addLayout(hosts_col)
+
+        # Divider
+        div = QWidget()
+        div.setFixedSize(1, 36)
+        div.setStyleSheet(f"background:{C_BORDER2};border:none;")
+        h.addWidget(div)
+
+        # DNS server status
+        dns_col = QVBoxLayout()
+        dns_col.setSpacing(4)
+        dl = _lbl("LAN DNS SERVER", C_TEXT3, 9, bold=True)
+        dl.setStyleSheet(
+            f"color:{C_TEXT3};font-size:9px;font-weight:700;letter-spacing:1.5px;background:transparent;"
+        )
+        self._dns_status_pill = QLabel("CHECKING...")
+        self._dns_status_pill.setStyleSheet(
+            f"color:{C_TEXT3};font-size:12px;font-weight:700;background:transparent;"
+        )
+        dns_col.addWidget(dl)
+        dns_col.addWidget(self._dns_status_pill)
+        h.addLayout(dns_col)
+
+        # Divider
+        div2 = QWidget()
+        div2.setFixedSize(1, 36)
+        div2.setStyleSheet(f"background:{C_BORDER2};border:none;")
+        h.addWidget(div2)
+
+        # Current IP
+        ip_col = QVBoxLayout()
+        ip_col.setSpacing(4)
+        il = _lbl("HOST IP ADDRESS", C_TEXT3, 9, bold=True)
+        il.setStyleSheet(
+            f"color:{C_TEXT3};font-size:9px;font-weight:700;letter-spacing:1.5px;background:transparent;"
+        )
+        self._ip_display = QLabel("—")
+        self._ip_display.setStyleSheet(
             f"color:{C_BLUE};font-size:16px;font-weight:800;"
             f"font-family:'Consolas','Courier New',monospace;background:transparent;"
         )
-        self._copy_ip_btn = _copy_btn("")
-        ip_row.addWidget(ip_label)
-        ip_row.addWidget(self._ip_lbl)
-        ip_row.addWidget(self._copy_ip_btn)
-        ip_row.addStretch()
-        cv.addLayout(ip_row)
+        ip_col.addWidget(il)
+        ip_col.addWidget(self._ip_display)
+        h.addLayout(ip_col)
+
+        h.addStretch()
+
+        # Test resolution button
+        test_btn = _btn("Test Resolution", C_SURFACE2, C_BORDER2, C_TEXT2, h=32)
+        test_btn.clicked.connect(self._test_resolution)
+        h.addWidget(test_btn)
+
+        self._test_result = QLabel("")
+        self._test_result.setStyleSheet(f"color:{C_TEXT3};font-size:11px;background:transparent;")
+        h.addWidget(self._test_result)
+
+        return w
+
+    # ── Hosts file card ───────────────────────────────────────────────────────
+
+    def _hosts_card(self):
+        card = self._card("Method 1 — Hosts File  (Local Machine Only, Recommended)")
+        cv = card.layout()
+
+        desc = QLabel(
+            "Adds pgops.test to your system's hosts file. Instant, reliable, no DNS server needed. "
+            "Only affects the machine running PGOps. Requires Administrator / sudo."
+        )
+        desc.setWordWrap(True)
+        desc.setStyleSheet(f"color:{C_TEXT3};font-size:12px;background:transparent;")
+        cv.addWidget(desc)
+
+        self._hosts_inject_lbl = QLabel("")
+        self._hosts_inject_lbl.setWordWrap(True)
+        self._hosts_inject_lbl.setStyleSheet(f"color:{C_TEXT3};font-size:11px;background:transparent;")
+        cv.addWidget(self._hosts_inject_lbl)
 
         btns = QHBoxLayout()
-        self._btn_start = _btn("Start DNS Server", "#166534", "#15803d", "#86efac", h=34)
-        self._btn_stop  = _btn("Stop",             "#7f1d1d", "#991b1b", "#fca5a5", h=34)
-        self._btn_test  = _btn("Test Resolution",  C_SURFACE2, C_BORDER2, C_TEXT2,  h=34)
-        self._btn_start.clicked.connect(self._start)
-        self._btn_stop.clicked.connect(self._stop)
-        self._btn_test.clicked.connect(self._test)
-        for b in (self._btn_start, self._btn_stop, self._btn_test):
-            btns.addWidget(b)
+        self.btn_inject   = _btn("Inject Hosts File",  "#166534", "#15803d", "#86efac", h=34)
+        self.btn_remove_h = _btn("Remove Entries",     "#7f1d1d", "#991b1b", "#fca5a5", h=34)
+        self.btn_inject.clicked.connect(self._inject_hosts)
+        self.btn_remove_h.clicked.connect(self._remove_hosts)
+        btns.addWidget(self.btn_inject)
+        btns.addWidget(self.btn_remove_h)
         btns.addStretch()
         cv.addLayout(btns)
 
-        self._test_result = _lbl("", C_TEXT3, 11)
-        cv.addWidget(self._test_result)
+        note = QLabel(
+            "After injecting: open https://pgops.test in your browser. "
+            "Accept the certificate warning once, or trust Caddy's CA from the SSL tab."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet(
+            f"background:#1e2a1e;color:#86efac;padding:10px 14px;"
+            f"border-radius:6px;font-size:11px;"
+        )
+        cv.addWidget(note)
+        return card
+
+    # ── DNS server card ───────────────────────────────────────────────────────
+
+    def _dns_server_card(self):
+        card = self._card("Method 2 — DNS Server  (All LAN Devices)")
+        cv = card.layout()
+
+        desc = QLabel(
+            "Runs a DNS server so every device on your network can resolve pgops.test automatically. "
+            "Requires Administrator / sudo for port 53. Point other devices' DNS to the Host IP above."
+        )
+        desc.setWordWrap(True)
+        desc.setStyleSheet(f"color:{C_TEXT3};font-size:12px;background:transparent;")
+        cv.addWidget(desc)
+
+        # Port info
+        self._dns_port_lbl = QLabel("")
+        self._dns_port_lbl.setStyleSheet(
+            f"color:{C_TEXT2};font-size:12px;font-family:'Consolas','Courier New',monospace;"
+            f"background:transparent;"
+        )
+        cv.addWidget(self._dns_port_lbl)
+
+        btns = QHBoxLayout()
+        self.btn_dns_start  = _btn("Start DNS Server",  "#166534", "#15803d", "#86efac", h=34)
+        self.btn_dns_stop   = _btn("Stop",              "#7f1d1d", "#991b1b", "#fca5a5", h=34)
+        self.btn_dns_start.clicked.connect(self._start_dns)
+        self.btn_dns_stop.clicked.connect(self._stop_dns)
+        btns.addWidget(self.btn_dns_start)
+        btns.addWidget(self.btn_dns_stop)
+        btns.addStretch()
+        cv.addLayout(btns)
+
+        warn = QLabel(
+            "If port 53 is denied, PGOps uses port 5353. "
+            "Clients must then set DNS to host-ip:5353 — most systems don't support custom ports natively. "
+            "Use hosts file injection for the local machine instead."
+        )
+        warn.setWordWrap(True)
+        warn.setStyleSheet(
+            f"background:#2a1e0a;color:#fbbf24;padding:10px 14px;"
+            f"border-radius:6px;font-size:11px;"
+        )
+        cv.addWidget(warn)
         return card
 
     # ── Instructions card ─────────────────────────────────────────────────────
 
     def _instructions_card(self):
-        card = self._card("Client Setup — Point Devices to this DNS Server")
+        card = self._card("Configure Other Devices  (LAN-Wide)")
         cv = card.layout()
         cv.addWidget(_lbl(
-            "Do this once per device. After that, all *.pgops.test subdomains work automatically.",
+            "Point other devices to this machine's DNS server, or manually add hosts entries on each device.",
             C_TEXT3, 12
         ))
 
-        # Platform tabs
-        tab_widget = QTabWidget()
-        tab_widget.setStyleSheet(
+        tabs = QTabWidget()
+        tabs.setStyleSheet(
             f"QTabWidget::pane{{background:{C_SURFACE2};border:1px solid {C_BORDER};"
             f"border-radius:6px;}}"
             f"QTabBar::tab{{background:{C_SURFACE};color:{C_TEXT3};"
@@ -198,52 +328,58 @@ class DnsTab(QWidget):
             f"border-bottom:none;border-radius:4px 4px 0 0;font-size:11px;font-weight:600;}}"
             f"QTabBar::tab:selected{{background:{C_SURFACE2};color:{C_TEXT};}}"
         )
-
         self._instr_texts: dict[str, QTextEdit] = {}
-        for platform_name in ("Windows", "macOS", "Android", "iOS", "Linux"):
+        for name in ("Windows", "macOS", "Android", "iOS", "Linux"):
             te = QTextEdit()
             te.setReadOnly(True)
-            te.setFixedHeight(120)
+            te.setFixedHeight(130)
             te.setStyleSheet(
                 f"background:{C_SURFACE2};color:{C_TEXT2};"
+                f"font-family:'Consolas','Courier New',monospace;"
                 f"font-size:12px;border:none;padding:10px;"
             )
-            self._instr_texts[platform_name] = te
-            tab_widget.addTab(te, platform_name)
-        cv.addWidget(tab_widget)
+            self._instr_texts[name] = te
+            tabs.addTab(te, name)
+        cv.addWidget(tabs)
         return card
 
     # ── QR card ───────────────────────────────────────────────────────────────
 
     def _qr_card(self):
-        card = self._card("Quick Setup — Scan QR Code")
+        card = self._card("Quick Setup — Scan on Other Devices")
         cv = card.layout()
-        cv.addWidget(_lbl(
-            "Scan to open the PGOps setup page on any device. "
-            "The page shows DNS instructions for that device's platform.",
-            C_TEXT3, 12
-        ))
 
         h = QHBoxLayout()
         self._qr_lbl = QLabel()
         self._qr_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._qr_lbl.setFixedSize(200, 200)
+        self._qr_lbl.setFixedSize(180, 180)
         self._qr_lbl.setStyleSheet(
             f"background:{C_SURFACE2};border:1px solid {C_BORDER};border-radius:8px;"
         )
         h.addWidget(self._qr_lbl)
 
         right = QVBoxLayout()
-        right.setSpacing(10)
-        right.addWidget(_lbl("pgops.test/setup", C_BLUE, 14, bold=True))
+        right.setSpacing(8)
+        right.addWidget(_lbl("https://pgops.test", C_BLUE, 15, bold=True))
         right.addWidget(_lbl(
-            "Open this URL on any device on your network to see\n"
-            "the full DNS configuration instructions.",
+            "Scan on any device to open the PGOps landing page.\n"
+            "The page shows DNS setup instructions for that device.",
             C_TEXT3, 12
         ))
-        open_btn = _btn("Open in Browser", C_BLUE, "#3b7de8", h=34)
-        open_btn.clicked.connect(lambda: webbrowser.open("http://pgops.test"))
-        right.addWidget(open_btn)
+
+        copy_row = QHBoxLayout()
+        copy_btn = _btn("Copy URL", C_SURFACE2, C_BORDER2, C_TEXT2, h=30)
+        copy_btn.clicked.connect(lambda: (
+            QApplication.clipboard().setText("https://pgops.test"),
+            copy_btn.setText("✓ Copied"),
+            QTimer.singleShot(1400, lambda: copy_btn.setText("Copy URL"))
+        ))
+        open_btn = _btn("Open in Browser", C_BLUE, "#3b7de8", h=30)
+        open_btn.clicked.connect(lambda: webbrowser.open("https://pgops.test"))
+        copy_row.addWidget(copy_btn)
+        copy_row.addWidget(open_btn)
+        copy_row.addStretch()
+        right.addLayout(copy_row)
         right.addStretch()
         h.addLayout(right)
         h.addStretch()
@@ -268,51 +404,73 @@ class DnsTab(QWidget):
         v.addWidget(_sep())
         return card
 
-    # ── Status refresh ────────────────────────────────────────────────────────
+    # ── Refresh / update ──────────────────────────────────────────────────────
 
-    def _refresh_status(self):
-        running = self._dns.is_running()
+    def refresh(self):
         host_ip = self._get_ip()
+        self._ip_display.setText(host_ip)
 
-        # Status label
-        if running:
+        # Hosts file status
+        from core.dns_server import is_hosts_injected, get_hosts_current_ip
+        injected = is_hosts_injected()
+        injected_ip = get_hosts_current_ip()
+
+        if injected and injected_ip:
+            if injected_ip == host_ip:
+                self._hosts_status_pill.setText("● ACTIVE")
+                self._hosts_status_pill.setStyleSheet(
+                    f"color:{C_GREEN};font-size:12px;font-weight:700;background:transparent;"
+                )
+                self._hosts_inject_lbl.setText(
+                    f"✓ pgops.test → {injected_ip}  (up to date)"
+                )
+            else:
+                self._hosts_status_pill.setText("⚠ STALE IP")
+                self._hosts_status_pill.setStyleSheet(
+                    f"color:{C_AMBER};font-size:12px;font-weight:700;background:transparent;"
+                )
+                self._hosts_inject_lbl.setText(
+                    f"pgops.test → {injected_ip}  (outdated — current IP is {host_ip})"
+                )
+        else:
+            self._hosts_status_pill.setText("● NOT SET")
+            self._hosts_status_pill.setStyleSheet(
+                f"color:{C_RED};font-size:12px;font-weight:700;background:transparent;"
+            )
+            self._hosts_inject_lbl.setText("Not injected — click 'Inject Hosts File' below.")
+
+        # DNS server status
+        dns_running = self._dns.is_running()
+        if dns_running:
             port = self._dns.port
             qualifier = "" if port == 53 else f" (port {port})"
-            self._status_lbl.setText(f"● RUNNING{qualifier}  —  *.pgops.test → {host_ip}")
-            self._status_lbl.setStyleSheet(
-                f"color:{C_GREEN};font-size:14px;font-weight:700;background:transparent;"
+            self._dns_status_pill.setText(f"● RUNNING{qualifier}")
+            self._dns_status_pill.setStyleSheet(
+                f"color:{C_GREEN};font-size:12px;font-weight:700;background:transparent;"
+            )
+            self._dns_port_lbl.setText(
+                f"Listening on 0.0.0.0:{port}  ·  *.pgops.test → {host_ip}"
             )
         else:
-            self._status_lbl.setText("● STOPPED")
-            self._status_lbl.setStyleSheet(
-                f"color:{C_RED};font-size:14px;font-weight:700;background:transparent;"
+            self._dns_status_pill.setText("● STOPPED")
+            self._dns_status_pill.setStyleSheet(
+                f"color:{C_RED};font-size:12px;font-weight:700;background:transparent;"
             )
-
-        # IP + copy button
-        self._ip_lbl.setText(host_ip)
-        # Rebuild copy button with current IP
-        self._copy_ip_btn.clicked.disconnect()
-        def _copy_ip():
-            QApplication.clipboard().setText(host_ip)
-            self._copy_ip_btn.setText("✓")
-            QTimer.singleShot(1300, lambda: self._copy_ip_btn.setText("Copy"))
-        self._copy_ip_btn.clicked.connect(_copy_ip)
+            self._dns_port_lbl.setText("Not running")
 
         # Instructions
         from core.dns_server import get_client_setup_instructions
         instructions = get_client_setup_instructions(host_ip)
-        for platform_name, text in instructions.items():
-            te = self._instr_texts.get(platform_name)
-            if te:
-                te.setPlainText(text)
+        for name, text in instructions.items():
+            if name in self._instr_texts:
+                self._instr_texts[name].setPlainText(text)
 
         # QR code
-        qr_url = f"http://pgops.test"
-        px = _make_qr_pixmap(qr_url, 190)
+        px = _make_qr_pixmap("https://pgops.test", 170)
         if px:
             self._qr_lbl.setPixmap(px)
         else:
-            self._qr_lbl.setText("Install qrcode library\npip install qrcode")
+            self._qr_lbl.setText("Install qrcode\npip install qrcode")
             self._qr_lbl.setStyleSheet(
                 f"color:{C_TEXT3};font-size:11px;"
                 f"background:{C_SURFACE2};border:1px solid {C_BORDER};border-radius:8px;"
@@ -320,17 +478,44 @@ class DnsTab(QWidget):
 
     # ── Button handlers ───────────────────────────────────────────────────────
 
-    def _start(self):
+    def _inject_hosts(self):
+        from core.app_manager import load_apps
+        apps = load_apps()
+        domains = [a.get("domain", "") for a in apps if a.get("domain")]
+        ok, msg = self._dns.inject_hosts(app_domains=domains)
+        self._on_log(f"[Hosts] {msg}")
+        if ok:
+            QMessageBox.information(
+                self, "Hosts File Updated",
+                f"{msg}\n\nYou can now open https://pgops.test in your browser.\n"
+                "Accept the certificate, or trust the Caddy CA from the SSL tab."
+            )
+        else:
+            QMessageBox.warning(self, "Hosts File Error", msg)
+        self.refresh()
+
+    def _remove_hosts(self):
+        ok, msg = self._dns.remove_hosts()
+        self._on_log(f"[Hosts] {msg}")
+        self.refresh()
+
+    def _start_dns(self):
         ok, msg = self._dns.start()
         self._on_log(msg)
-        self._refresh_status()
+        if not ok:
+            QMessageBox.warning(
+                self, "DNS Server",
+                f"{msg}\n\nTip: Use 'Inject Hosts File' for the local machine instead — "
+                "it requires no special permissions and works immediately."
+            )
+        self.refresh()
 
-    def _stop(self):
+    def _stop_dns(self):
         ok, msg = self._dns.stop()
         self._on_log(msg)
-        self._refresh_status()
+        self.refresh()
 
-    def _test(self):
+    def _test_resolution(self):
         from core.dns_server import test_resolution
         ok, msg = test_resolution()
         self._test_result.setText(msg)
@@ -339,6 +524,3 @@ class DnsTab(QWidget):
             f"color:{color};font-size:11px;background:transparent;"
         )
         self._on_log(f"[DNS Test] {msg}")
-
-    def refresh(self):
-        self._refresh_status()
