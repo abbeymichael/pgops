@@ -20,15 +20,15 @@ def get_app_data_dir() -> Path:
 CONFIG_FILE = get_app_data_dir() / "config.json"
 
 DEFAULT_CONFIG = {
-    "username":         "postgres",
-    "password":         "postgres",
-    "database":         "mydb",
-    "port":             5432,
-    "autostart":        False,
-    "preferred_ip":     "",
-    "caddy_http_port":  80,
-    "caddy_https_port": 443,
-    "landing_port":     8080,
+    "username": "postgres",
+    "password": "postgres",
+    "database": "mydb",
+    "port": 5432,
+    "autostart": False,
+    "preferred_ip": "",
+    "caddy_http_port": 8080,  # was 80 — changed to avoid admin requirement
+    "caddy_https_port": 8443,  # was 443
+    "landing_port": 8081,  # separate from Caddy HTTP port
 }
 
 

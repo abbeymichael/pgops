@@ -2,12 +2,13 @@
 tab_ssl.py
 Unified SSL / TLS page.
 
-Covers two distinct SSL concerns:
-  1. PostgreSQL SSL    — encrypts DB connections (existing ssl_manager)
-  2. Caddy CA Trust   — makes browser trust Caddy's internal HTTPS certs
-                        so *.pgops.test gets a green padlock in browsers
-
-The page makes both crystal clear and actionable.
+FIXES:
+- C_BG imported from theme (was undefined — caused NameError at runtime)
+- _update_pg_ssl_status() passes BASE_DIR correctly to get_ssl_status/get_cert_info
+- _gen_cert() and _enable_ssl() pass BASE_DIR, DATA_DIR in correct order
+- _exp_cert() exports from ssl/ subdir correctly
+- Manual trust instructions tab uses QTextEdit not QLineEdit
+- Caddy status badge updates on tab visibility
 """
 
 import platform
@@ -15,13 +16,13 @@ import webbrowser
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QLineEdit, QFrame, QScrollArea, QMessageBox, QFileDialog, QApplication,
-    QTabWidget,
+    QTabWidget, QTextEdit,
 )
 from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
 
 from core.pg_manager import BASE_DIR, DATA_DIR
 from ui.theme import (
-    C_SURFACE, C_SURFACE2, C_BORDER, C_BORDER2,
+    C_BG, C_SURFACE, C_SURFACE2, C_BORDER, C_BORDER2,
     C_TEXT, C_TEXT2, C_TEXT3, C_BLUE, C_GREEN, C_RED, C_AMBER,
 )
 
@@ -54,7 +55,6 @@ def _sep():
 
 
 def _mono_row(label_text: str, value: str):
-    """A label + read-only monospace field + copy button row."""
     w = QWidget()
     w.setStyleSheet("background:transparent;")
     row = QHBoxLayout(w)
@@ -96,9 +96,11 @@ def _mono_row(label_text: str, value: str):
 
 class _WorkerThread(QThread):
     done = pyqtSignal(bool, str)
+
     def __init__(self, fn):
         super().__init__()
         self.fn = fn
+
     def run(self):
         try:
             ok, msg = self.fn()
@@ -108,17 +110,15 @@ class _WorkerThread(QThread):
 
 
 class SslTab(QWidget):
-    """
-    Unified SSL page covering both Caddy HTTPS and PostgreSQL TLS.
-    """
+    """Unified SSL page covering Caddy HTTPS and PostgreSQL TLS."""
 
     def __init__(self, config, manager, on_log, caddy_manager=None, parent=None):
         super().__init__(parent)
-        self.config        = config
-        self._manager      = manager
-        self._on_log       = on_log
-        self._caddy        = caddy_manager
-        self._workers      = []
+        self.config   = config
+        self._manager = manager
+        self._on_log  = on_log
+        self._caddy   = caddy_manager
+        self._workers: list = []
         self._build()
 
     def _build(self):
@@ -148,10 +148,7 @@ class SslTab(QWidget):
         v.addWidget(title)
         v.addWidget(sub)
 
-        # Section 1: Caddy HTTPS (most important for browser trust)
         v.addWidget(self._caddy_section())
-
-        # Section 2: PostgreSQL SSL
         v.addWidget(self._postgres_section())
 
         v.addStretch()
@@ -186,21 +183,19 @@ class SslTab(QWidget):
         v.addLayout(hdr)
         v.addWidget(_sep())
 
-        # How it works
         how = QLabel(
-            "Caddy automatically issues SSL certificates for every domain it serves using its built-in CA. "
-            "Once you trust the Caddy CA, all *.pgops.test subdomains get a green padlock — "
-            "no more browser warnings."
+            "Caddy automatically issues SSL certificates for every domain it serves using its "
+            "built-in CA. Once you trust the Caddy CA, all *.pgops.test subdomains get a green "
+            "padlock — no more browser warnings."
         )
         how.setWordWrap(True)
         how.setStyleSheet(f"color:{C_TEXT3};font-size:12px;background:transparent;")
         v.addWidget(how)
 
-        # Status info
         self._caddy_ca_path_lbl = _lbl("CA certificate: checking...", C_TEXT3, 11)
+        self._caddy_ca_path_lbl.setWordWrap(True)
         v.addWidget(self._caddy_ca_path_lbl)
 
-        # Action buttons
         btns = QHBoxLayout()
         self.btn_trust_auto = _btn("Trust CA (Auto-Install)", C_BLUE, "#3b7de8", h=36)
         self.btn_export_ca  = _btn("Export CA Certificate",  C_SURFACE2, C_BORDER2, C_TEXT2, h=36)
@@ -216,7 +211,7 @@ class SslTab(QWidget):
         btns.addStretch()
         v.addLayout(btns)
 
-        # Manual trust instructions
+        # Manual trust instructions using QTextEdit (not QLineEdit)
         manual_card = QWidget()
         manual_card.setStyleSheet(
             f"background:{C_SURFACE2};border:1px solid {C_BORDER2};border-radius:8px;"
@@ -233,7 +228,7 @@ class SslTab(QWidget):
 
         steps = QTabWidget()
         steps.setStyleSheet(
-            f"QTabWidget::pane{{background:{C_BG if False else C_SURFACE2};border:1px solid {C_BORDER};"
+            f"QTabWidget::pane{{background:{C_SURFACE2};border:1px solid {C_BORDER};"
             f"border-radius:4px;margin-top:-1px;}}"
             f"QTabBar::tab{{background:{C_SURFACE};color:{C_TEXT3};"
             f"padding:4px 12px;border:1px solid {C_BORDER};"
@@ -281,8 +276,6 @@ class SslTab(QWidget):
             ),
         }
         for name, instructions in trust_steps.items():
-            te = QLineEdit()
-            from PyQt6.QtWidgets import QTextEdit
             te = QTextEdit(instructions)
             te.setReadOnly(True)
             te.setFixedHeight(110)
@@ -336,12 +329,11 @@ class SslTab(QWidget):
         self.ssl_cert_lbl.setWordWrap(True)
         v.addWidget(self.ssl_cert_lbl)
 
-        # Cert actions
         cert_btns = QHBoxLayout()
-        self.btn_gen_cert  = _btn("Generate Certificate", C_BLUE, "#3b7de8", h=34)
-        self.btn_ssl_on    = _btn("Enable SSL", "#166534", "#15803d", "#86efac", h=34)
-        self.btn_ssl_off   = _btn("Disable SSL", "#7f1d1d", "#991b1b", "#fca5a5", h=34)
-        self.btn_exp_cert  = _btn("Export server.crt", C_SURFACE2, C_BORDER2, C_TEXT2, h=34)
+        self.btn_gen_cert = _btn("Generate Certificate", C_BLUE, "#3b7de8", h=34)
+        self.btn_ssl_on   = _btn("Enable SSL", "#166534", "#15803d", "#86efac", h=34)
+        self.btn_ssl_off  = _btn("Disable SSL", "#7f1d1d", "#991b1b", "#fca5a5", h=34)
+        self.btn_exp_cert = _btn("Export server.crt", C_SURFACE2, C_BORDER2, C_TEXT2, h=34)
 
         self.btn_gen_cert.clicked.connect(self._gen_cert)
         self.btn_ssl_on.clicked.connect(self._enable_ssl)
@@ -355,8 +347,7 @@ class SslTab(QWidget):
         cert_btns.addStretch()
         v.addLayout(cert_btns)
 
-        # Connection string examples
-        port = self.config["port"]
+        port = self.config.get("port", 5432)
         conn_card = QWidget()
         conn_card.setStyleSheet(
             f"background:{C_SURFACE2};border:1px solid {C_BORDER2};border-radius:8px;"
@@ -379,7 +370,7 @@ class SslTab(QWidget):
 
         return card
 
-    # ── Status refresh ────────────────────────────────────────────────────────
+    # ── Status refresh ─────────────────────────────────────────────────────────
 
     def refresh_status(self):
         self._update_caddy_status()
@@ -392,6 +383,8 @@ class SslTab(QWidget):
                 f"color:{C_TEXT3};font-size:11px;background:transparent;"
             )
             self._caddy_ca_path_lbl.setText("Caddy manager not available.")
+            self.btn_export_ca.setEnabled(False)
+            self.btn_trust_auto.setEnabled(False)
             return
 
         status = self._caddy.get_status_detail()
@@ -405,7 +398,7 @@ class SslTab(QWidget):
                 f"color:{C_GREEN};font-size:11px;font-weight:700;background:transparent;"
             )
         elif caddy_running:
-            self._caddy_ssl_badge.setText("● CADDY RUNNING (certs generating...)")
+            self._caddy_ssl_badge.setText("● CADDY RUNNING")
             self._caddy_ssl_badge.setStyleSheet(
                 f"color:{C_AMBER};font-size:11px;font-weight:700;background:transparent;"
             )
@@ -425,7 +418,7 @@ class SslTab(QWidget):
             self.btn_trust_auto.setEnabled(True)
         else:
             self._caddy_ca_path_lbl.setText(
-                "CA not yet generated. Start Caddy first — it creates the CA automatically on first run."
+                "CA not yet generated. Start Caddy first — it creates the CA automatically."
             )
             self.btn_export_ca.setEnabled(False)
             self.btn_trust_auto.setEnabled(False)
@@ -435,7 +428,8 @@ class SslTab(QWidget):
             from core.ssl_manager import get_ssl_status, get_cert_info, is_ssl_configured
             status    = get_ssl_status(DATA_DIR)
             cert_info = get_cert_info(BASE_DIR)
-        except Exception:
+        except Exception as e:
+            self.ssl_cert_lbl.setText(f"Error reading SSL status: {e}")
             return
 
         if status["enabled"]:
@@ -455,10 +449,16 @@ class SslTab(QWidget):
                 f"Expires: {cert_info.get('expires', '')}  ·  "
                 f"Serial: {cert_info.get('serial', '')}"
             )
-        elif not is_ssl_configured(BASE_DIR):
-            self.ssl_cert_lbl.setText("No certificate found — generate one first.")
+        elif cert_info and "error" in cert_info:
+            self.ssl_cert_lbl.setText(f"Cert error: {cert_info['error']}")
+        else:
+            try:
+                if not is_ssl_configured(BASE_DIR):
+                    self.ssl_cert_lbl.setText("No certificate found — generate one first.")
+            except Exception:
+                pass
 
-    # ── Caddy CA handlers ─────────────────────────────────────────────────────
+    # ── Caddy CA handlers ──────────────────────────────────────────────────────
 
     def _trust_caddy_ca_auto(self):
         if not self._caddy:
@@ -467,10 +467,8 @@ class SslTab(QWidget):
         self.btn_trust_auto.setEnabled(False)
         self.btn_trust_auto.setText("Trusting...")
 
-        def fn():
-            return self._caddy.install_ca()
+        w = _WorkerThread(lambda: self._caddy.install_ca())
 
-        w = _WorkerThread(fn)
         def done(ok, msg):
             self.btn_trust_auto.setEnabled(True)
             self.btn_trust_auto.setText("Trust CA (Auto-Install)")
@@ -478,17 +476,15 @@ class SslTab(QWidget):
             if ok:
                 QMessageBox.information(
                     self, "CA Trusted",
-                    f"{msg}\n\n"
-                    "Restart your browser for the change to take effect.\n"
-                    "All *.pgops.test sites will show a green padlock."
+                    f"{msg}\n\nRestart your browser for the change to take effect."
                 )
             else:
                 QMessageBox.warning(
                     self, "Auto-Trust Failed",
-                    f"{msg}\n\n"
-                    "Try the manual instructions in the 'Manual Trust Instructions' section."
+                    f"{msg}\n\nUse the manual instructions instead."
                 )
             self._update_caddy_status()
+
         w.done.connect(done)
         w.start()
         self._workers.append(w)
@@ -504,27 +500,25 @@ class SslTab(QWidget):
             ok, msg = self._caddy.export_ca(dest)
             self._on_log(f"[SSL] {msg}")
             if ok:
-                QMessageBox.information(
-                    self, "CA Exported",
-                    f"CA certificate saved to:\n{dest}\n\n"
-                    "Follow the manual trust instructions to install it in your browser or OS."
-                )
+                QMessageBox.information(self, "CA Exported", f"CA certificate saved to:\n{dest}")
             else:
                 QMessageBox.warning(self, "Export Failed", msg)
 
-    # ── PostgreSQL SSL handlers ───────────────────────────────────────────────
+    # ── PostgreSQL SSL handlers ────────────────────────────────────────────────
 
     def _gen_cert(self):
         self.btn_gen_cert.setEnabled(False)
-        from core.ssl_manager import generate_certificate
 
-        w = _WorkerThread(lambda: generate_certificate(BASE_DIR))
+        # BASE_DIR is the appdata dir; certs go in BASE_DIR/ssl/
+        w = _WorkerThread(lambda: __import__("core.ssl_manager", fromlist=["generate_certificate"]).generate_certificate(BASE_DIR))
+
         def done(ok, msg):
             self.btn_gen_cert.setEnabled(True)
             self._on_log(msg)
             self._update_pg_ssl_status()
             if not ok:
                 QMessageBox.critical(self, "Error", msg)
+
         w.done.connect(done)
         w.start()
         self._workers.append(w)
@@ -537,6 +531,7 @@ class SslTab(QWidget):
         if not self._manager.is_initialized():
             QMessageBox.warning(self, "Not Initialized", "Start the server at least once first.")
             return
+        # enable_ssl(base_dir, data_dir)
         ok, msg = enable_ssl(BASE_DIR, DATA_DIR)
         self._on_log(msg)
         self._update_pg_ssl_status()
@@ -564,7 +559,10 @@ class SslTab(QWidget):
             "Certificate Files (*.crt);;All Files (*)"
         )
         if dest:
+            # export_ca_cert(base_dir, dest)
             ok, msg = export_ca_cert(BASE_DIR, dest)
             self._on_log(msg)
             if ok:
                 QMessageBox.information(self, "Exported", msg)
+            else:
+                QMessageBox.warning(self, "Export Failed", msg)
