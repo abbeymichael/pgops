@@ -1,22 +1,22 @@
 """
-tab_ssl.py
-Unified SSL / TLS page.
+tab_ssl.py  (v2 — mkcert edition)
 
-FIXES:
-- C_BG imported from theme (was undefined — caused NameError at runtime)
-- _update_pg_ssl_status() passes BASE_DIR correctly to get_ssl_status/get_cert_info
-- _gen_cert() and _enable_ssl() pass BASE_DIR, DATA_DIR in correct order
-- _exp_cert() exports from ssl/ subdir correctly
-- Manual trust instructions tab uses QTextEdit not QLineEdit
-- Caddy status badge updates on tab visibility
+Replaces the previous self-signed cert workflow with mkcert.
+mkcert installs a local CA into the system trust store so browsers,
+curl, psql, etc. all trust generated certs automatically.
+
+Sections:
+  1. mkcert Setup   — download, install CA, generate cert
+  2. PostgreSQL TLS — enable/disable SSL in postgresql.conf using mkcert cert
+  3. Caddy HTTPS    — status only (Caddy uses the same mkcert cert)
 """
 
-import platform
 import webbrowser
+from pathlib import Path
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QLineEdit, QFrame, QScrollArea, QMessageBox, QFileDialog, QApplication,
-    QTabWidget, QTextEdit,
+    QLineEdit, QFrame, QScrollArea, QMessageBox, QFileDialog,
+    QApplication, QProgressBar, QTabWidget, QTextEdit,
 )
 from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
 
@@ -60,7 +60,6 @@ def _mono_row(label_text: str, value: str):
     row = QHBoxLayout(w)
     row.setContentsMargins(0, 0, 0, 0)
     row.setSpacing(8)
-
     lbl = QLabel(label_text)
     lbl.setFixedWidth(90)
     lbl.setStyleSheet(
@@ -94,8 +93,9 @@ def _mono_row(label_text: str, value: str):
     return w
 
 
-class _WorkerThread(QThread):
+class _Worker(QThread):
     done = pyqtSignal(bool, str)
+    progress = pyqtSignal(int)
 
     def __init__(self, fn):
         super().__init__()
@@ -103,15 +103,16 @@ class _WorkerThread(QThread):
 
     def run(self):
         try:
-            ok, msg = self.fn()
-            self.done.emit(ok, msg)
+            result = self.fn(self.progress.emit)
+            if isinstance(result, tuple):
+                self.done.emit(bool(result[0]), str(result[1]) if len(result) > 1 else "")
+            else:
+                self.done.emit(bool(result), "")
         except Exception as e:
             self.done.emit(False, str(e))
 
 
 class SslTab(QWidget):
-    """Unified SSL page covering Caddy HTTPS and PostgreSQL TLS."""
-
     def __init__(self, config, manager, on_log, caddy_manager=None, parent=None):
         super().__init__(parent)
         self.config   = config
@@ -141,15 +142,17 @@ class SslTab(QWidget):
             f"color:{C_TEXT};font-size:22px;font-weight:800;background:transparent;"
         )
         sub = QLabel(
-            "Manage HTTPS for web apps (Caddy CA) and encrypted database connections (PostgreSQL TLS)."
+            "mkcert creates a trusted local certificate authority. "
+            "Once installed, browsers and apps trust PGOps certificates automatically — no warnings."
         )
         sub.setWordWrap(True)
         sub.setStyleSheet(f"color:{C_TEXT3};font-size:12px;background:transparent;")
         v.addWidget(title)
         v.addWidget(sub)
 
-        v.addWidget(self._caddy_section())
+        v.addWidget(self._mkcert_section())
         v.addWidget(self._postgres_section())
+        v.addWidget(self._caddy_section())
 
         v.addStretch()
         scroll.setWidget(inner)
@@ -157,125 +160,137 @@ class SslTab(QWidget):
 
         QTimer.singleShot(300, self.refresh_status)
 
-    # ── Caddy CA section ──────────────────────────────────────────────────────
+    # ── mkcert section ─────────────────────────────────────────────────────────
 
-    def _caddy_section(self):
-        card = QWidget()
-        card.setStyleSheet(
-            f"background:{C_SURFACE};border:1px solid {C_BORDER};border-radius:10px;"
+    def _mkcert_section(self):
+        card = self._card("Certificate Authority  —  mkcert")
+        cv = card.layout()
+
+        desc = QLabel(
+            "mkcert installs a local CA into your system trust stores (Windows, macOS, "
+            "Firefox, Chrome). Any cert it generates is trusted everywhere on this machine. "
+            "Clients on other devices can import the CA certificate once to get full trust."
         )
-        v = QVBoxLayout(card)
-        v.setContentsMargins(22, 20, 22, 20)
-        v.setSpacing(14)
+        desc.setWordWrap(True)
+        desc.setStyleSheet(f"color:{C_TEXT3};font-size:12px;background:transparent;")
+        cv.addWidget(desc)
 
-        hdr = QHBoxLayout()
-        t = QLabel("HTTPS for pgops.test  —  Caddy Internal CA")
-        t.setStyleSheet(
-            f"color:{C_TEXT};font-size:15px;font-weight:700;background:transparent;"
+        # Status row
+        status_row = QHBoxLayout()
+        self._mkcert_binary_lbl = _lbl("Binary: checking...", C_TEXT3, 11)
+        self._mkcert_ca_lbl     = _lbl("CA: checking...", C_TEXT3, 11)
+        self._mkcert_cert_lbl   = _lbl("Certificate: checking...", C_TEXT3, 11)
+        status_row.addWidget(self._mkcert_binary_lbl)
+        status_row.addSpacing(20)
+        status_row.addWidget(self._mkcert_ca_lbl)
+        status_row.addSpacing(20)
+        status_row.addWidget(self._mkcert_cert_lbl)
+        status_row.addStretch()
+        cv.addLayout(status_row)
+
+        # Progress bar (shown during setup)
+        self._mkcert_prog = QProgressBar()
+        self._mkcert_prog.setVisible(False)
+        self._mkcert_prog.setFixedHeight(3)
+        self._mkcert_prog.setTextVisible(False)
+        self._mkcert_prog.setStyleSheet(
+            f"QProgressBar{{background:{C_BORDER};border:none;}}"
+            f"QProgressBar::chunk{{background:{C_GREEN};}}"
         )
-        self._caddy_ssl_badge = QLabel("CHECKING...")
-        self._caddy_ssl_badge.setStyleSheet(
-            f"color:{C_TEXT3};font-size:11px;background:transparent;"
-        )
-        hdr.addWidget(t)
-        hdr.addStretch()
-        hdr.addWidget(self._caddy_ssl_badge)
-        v.addLayout(hdr)
-        v.addWidget(_sep())
+        cv.addWidget(self._mkcert_prog)
 
-        how = QLabel(
-            "Caddy automatically issues SSL certificates for every domain it serves using its "
-            "built-in CA. Once you trust the Caddy CA, all *.pgops.test subdomains get a green "
-            "padlock — no more browser warnings."
-        )
-        how.setWordWrap(True)
-        how.setStyleSheet(f"color:{C_TEXT3};font-size:12px;background:transparent;")
-        v.addWidget(how)
-
-        self._caddy_ca_path_lbl = _lbl("CA certificate: checking...", C_TEXT3, 11)
-        self._caddy_ca_path_lbl.setWordWrap(True)
-        v.addWidget(self._caddy_ca_path_lbl)
-
+        # Action buttons
         btns = QHBoxLayout()
-        self.btn_trust_auto = _btn("Trust CA (Auto-Install)", C_BLUE, "#3b7de8", h=36)
-        self.btn_export_ca  = _btn("Export CA Certificate",  C_SURFACE2, C_BORDER2, C_TEXT2, h=36)
-        self.btn_open_https = _btn("Open https://pgops.test →", "#166534", "#15803d", "#86efac", h=36)
+        btns.setSpacing(8)
 
-        self.btn_trust_auto.clicked.connect(self._trust_caddy_ca_auto)
-        self.btn_export_ca.clicked.connect(self._export_caddy_ca)
-        self.btn_open_https.clicked.connect(lambda: webbrowser.open("https://pgops.test"))
+        self.btn_mkcert_setup  = _btn("Full Setup (Download + Trust CA + Generate Cert)",
+                                      C_BLUE, "#3b7de8", h=36)
+        self.btn_mkcert_regen  = _btn("Regenerate Cert", C_SURFACE2, C_BORDER2, C_TEXT2, h=36)
+        self.btn_export_ca     = _btn("Export CA for Clients", C_SURFACE2, C_BORDER2, C_TEXT2, h=36)
 
-        btns.addWidget(self.btn_trust_auto)
+        self.btn_mkcert_setup.clicked.connect(self._full_setup)
+        self.btn_mkcert_regen.clicked.connect(self._regen_cert)
+        self.btn_export_ca.clicked.connect(self._export_ca)
+
+        btns.addWidget(self.btn_mkcert_setup)
+        btns.addWidget(self.btn_mkcert_regen)
         btns.addWidget(self.btn_export_ca)
-        btns.addWidget(self.btn_open_https)
         btns.addStretch()
-        v.addLayout(btns)
+        cv.addLayout(btns)
 
-        # Manual trust instructions using QTextEdit (not QLineEdit)
-        manual_card = QWidget()
-        manual_card.setStyleSheet(
+        # Cert details
+        self._cert_details_lbl = _lbl("", C_TEXT3, 11)
+        self._cert_details_lbl.setWordWrap(True)
+        cv.addWidget(self._cert_details_lbl)
+
+        # Client device trust instructions
+        client_card = QWidget()
+        client_card.setStyleSheet(
             f"background:{C_SURFACE2};border:1px solid {C_BORDER2};border-radius:8px;"
         )
-        mv = QVBoxLayout(manual_card)
-        mv.setContentsMargins(14, 12, 14, 12)
-        mv.setSpacing(8)
+        clv = QVBoxLayout(client_card)
+        clv.setContentsMargins(14, 12, 14, 12)
+        clv.setSpacing(8)
 
-        ml = QLabel("Manual Trust Instructions (if auto-install fails)")
-        ml.setStyleSheet(
+        cl_title = QLabel("Trust on Other Devices (import exported CA once per device)")
+        cl_title.setStyleSheet(
             f"color:{C_TEXT};font-size:12px;font-weight:700;background:transparent;"
         )
-        mv.addWidget(ml)
+        clv.addWidget(cl_title)
 
-        steps = QTabWidget()
-        steps.setStyleSheet(
+        tabs = QTabWidget()
+        tabs.setStyleSheet(
             f"QTabWidget::pane{{background:{C_SURFACE2};border:1px solid {C_BORDER};"
-            f"border-radius:4px;margin-top:-1px;}}"
+            f"border-radius:4px;}}"
             f"QTabBar::tab{{background:{C_SURFACE};color:{C_TEXT3};"
             f"padding:4px 12px;border:1px solid {C_BORDER};"
             f"border-bottom:none;border-radius:3px 3px 0 0;font-size:11px;}}"
             f"QTabBar::tab:selected{{background:{C_SURFACE2};color:{C_TEXT};}}"
         )
-
-        trust_steps = {
+        steps = {
             "Windows": (
-                "1. Click 'Export CA Certificate' → save as pgops-ca.crt\n"
+                "1. Click 'Export CA for Clients' → save as pgops-ca.crt\n"
                 "2. Double-click pgops-ca.crt\n"
-                "3. Click 'Install Certificate'\n"
-                "4. Store location: Local Machine → Next\n"
-                "5. 'Place all certificates in the following store'\n"
-                "6. Browse → 'Trusted Root Certification Authorities'\n"
-                "7. Finish → Yes → OK\n"
-                "8. Restart your browser"
-            ),
-            "macOS": (
-                "1. Click 'Export CA Certificate' → save as pgops-ca.crt\n"
-                "2. Double-click pgops-ca.crt → opens Keychain Access\n"
-                "3. In Keychain Access, find 'PGOps Local CA'\n"
-                "4. Double-click it → expand 'Trust'\n"
-                "5. 'When using this certificate' → 'Always Trust'\n"
-                "6. Close → enter your password\n"
+                "3. Click 'Install Certificate' → Local Machine → Next\n"
+                "4. 'Place all certificates in the following store'\n"
+                "5. Browse → 'Trusted Root Certification Authorities' → Finish\n"
+                "6. Click Yes on the security prompt\n"
                 "7. Restart your browser"
             ),
-            "Firefox": (
-                "Firefox uses its own cert store:\n"
-                "1. Click 'Export CA Certificate' → save as pgops-ca.crt\n"
-                "2. Firefox → Settings → Privacy & Security\n"
-                "3. Scroll to Certificates → View Certificates\n"
-                "4. Authorities tab → Import → select pgops-ca.crt\n"
-                "5. Check 'Trust this CA to identify websites'\n"
-                "6. OK → restart Firefox"
+            "macOS": (
+                "1. Click 'Export CA for Clients' → save as pgops-ca.crt\n"
+                "2. Double-click pgops-ca.crt → Keychain Access opens\n"
+                "3. Find 'mkcert ...' in the list, double-click it\n"
+                "4. Expand 'Trust' → 'When using this certificate' → 'Always Trust'\n"
+                "5. Close → enter your password to confirm\n"
+                "6. Restart your browser"
+            ),
+            "Android": (
+                "1. Export CA and copy pgops-ca.crt to the device (email or USB)\n"
+                "2. Settings → Security → Install from storage (or 'Install a certificate')\n"
+                "3. Select pgops-ca.crt → name it 'PGOps CA'\n"
+                "4. The certificate is now trusted for Wi-Fi and apps\n"
+                "(Chrome on Android uses the system store — no extra step needed)"
+            ),
+            "iOS": (
+                "1. Export CA and AirDrop or email pgops-ca.crt to your iPhone/iPad\n"
+                "2. Tap the file → 'Allow' → Settings shows 'Profile Downloaded'\n"
+                "3. Settings → General → VPN & Device Management → Install\n"
+                "4. Settings → General → About → Certificate Trust Settings\n"
+                "5. Enable full trust for the mkcert root CA\n"
+                "6. Safari and other apps now trust PGOps certificates"
             ),
             "Linux": (
                 "Ubuntu/Debian:\n"
-                "  sudo cp pgops-ca.crt /usr/local/share/ca-certificates/\n"
+                "  sudo cp pgops-ca.crt /usr/local/share/ca-certificates/pgops-ca.crt\n"
                 "  sudo update-ca-certificates\n\n"
                 "Fedora/RHEL:\n"
                 "  sudo cp pgops-ca.crt /etc/pki/ca-trust/source/anchors/\n"
-                "  sudo update-ca-trust\n\n"
+                "  sudo update-ca-trust extract\n\n"
                 "Then restart your browser."
             ),
         }
-        for name, instructions in trust_steps.items():
+        for name, instructions in steps.items():
             te = QTextEdit(instructions)
             te.setReadOnly(True)
             te.setFixedHeight(110)
@@ -284,15 +299,118 @@ class SslTab(QWidget):
                 f"font-family:'Consolas','Courier New',monospace;"
                 f"font-size:11px;border:none;padding:8px;"
             )
-            steps.addTab(te, name)
-        mv.addWidget(steps)
-        v.addWidget(manual_card)
-
+            tabs.addTab(te, name)
+        clv.addWidget(tabs)
+        cv.addWidget(client_card)
         return card
 
-    # ── PostgreSQL SSL section ─────────────────────────────────────────────────
+    # ── PostgreSQL TLS section ─────────────────────────────────────────────────
 
     def _postgres_section(self):
+        card = self._card("PostgreSQL TLS  —  Encrypted Database Connections")
+        cv = card.layout()
+
+        desc = _lbl(
+            "Enables TLS on PostgreSQL using the mkcert certificate. "
+            "Apps connect with sslmode=require. "
+            "The mkcert cert must be generated first.",
+            C_TEXT3, 12,
+        )
+        desc.setWordWrap(True)
+        cv.addWidget(desc)
+
+        # Status
+        status_row = QHBoxLayout()
+        self.ssl_status_lbl = QLabel("Checking...")
+        self.ssl_status_lbl.setStyleSheet(
+            f"color:{C_TEXT2};font-size:13px;font-weight:700;background:transparent;"
+        )
+        status_row.addWidget(self.ssl_status_lbl)
+        status_row.addStretch()
+        cv.addLayout(status_row)
+
+        self.ssl_cert_lbl = _lbl("", C_TEXT3, 11)
+        self.ssl_cert_lbl.setWordWrap(True)
+        cv.addWidget(self.ssl_cert_lbl)
+
+        # Buttons
+        btns = QHBoxLayout()
+        btns.setSpacing(8)
+        self.btn_ssl_on  = _btn("Enable SSL",  "#166534", "#15803d", "#86efac", h=34)
+        self.btn_ssl_off = _btn("Disable SSL", "#7f1d1d", "#991b1b", "#fca5a5", h=34)
+        self.btn_ssl_on.clicked.connect(self._enable_ssl)
+        self.btn_ssl_off.clicked.connect(self._disable_ssl)
+        btns.addWidget(self.btn_ssl_on)
+        btns.addWidget(self.btn_ssl_off)
+        btns.addStretch()
+        cv.addLayout(btns)
+
+        # Connection string examples
+        port = self.config.get("port", 5432)
+        conn_card = QWidget()
+        conn_card.setStyleSheet(
+            f"background:{C_SURFACE2};border:1px solid {C_BORDER2};border-radius:8px;"
+        )
+        cv2 = QVBoxLayout(conn_card)
+        cv2.setContentsMargins(14, 12, 14, 12)
+        cv2.setSpacing(8)
+        cv2.addWidget(_lbl("CLIENT CONNECTION STRINGS", C_TEXT3, 10))
+        cv2.addWidget(_mono_row(
+            "URL",
+            f"postgresql://user:pass@pgops.test:{port}/dbname?sslmode=require"
+        ))
+        cv2.addWidget(_mono_row("Laravel", "DB_SSLMODE=require  (in .env)"))
+        cv2.addWidget(_mono_row("psycopg2", "sslmode='require'  (in connect())"))
+        cv.addWidget(conn_card)
+
+        cv.addWidget(_lbl(
+            "Restart PostgreSQL after enabling or disabling SSL.",
+            C_TEXT3, 11,
+        ))
+        return card
+
+    # ── Caddy status section ───────────────────────────────────────────────────
+
+    def _caddy_section(self):
+        card = self._card("HTTPS for Web Apps  —  Caddy + mkcert")
+        cv = card.layout()
+
+        desc = QLabel(
+            "Caddy uses the same mkcert certificate to serve all *.pgops.test domains over HTTPS. "
+            "No additional configuration is required — once mkcert setup is complete and "
+            "Caddy is running, all apps are available over HTTPS."
+        )
+        desc.setWordWrap(True)
+        desc.setStyleSheet(f"color:{C_TEXT3};font-size:12px;background:transparent;")
+        cv.addWidget(desc)
+
+        status_row = QHBoxLayout()
+        self._caddy_ssl_badge = QLabel("Checking...")
+        self._caddy_ssl_badge.setStyleSheet(
+            f"color:{C_TEXT3};font-size:12px;background:transparent;"
+        )
+        status_row.addWidget(self._caddy_ssl_badge)
+        status_row.addStretch()
+        cv.addLayout(status_row)
+
+        self._caddy_url_lbl = _lbl("", C_BLUE, 12)
+        cv.addWidget(self._caddy_url_lbl)
+
+        btns = QHBoxLayout()
+        self.btn_open_https = _btn(
+            "Open https://pgops.test →", "#166534", "#15803d", "#86efac", h=34
+        )
+        self.btn_open_https.clicked.connect(
+            lambda: webbrowser.open("https://pgops.test")
+        )
+        btns.addWidget(self.btn_open_https)
+        btns.addStretch()
+        cv.addLayout(btns)
+        return card
+
+    # ── Card helper ────────────────────────────────────────────────────────────
+
+    def _card(self, title: str) -> QWidget:
         card = QWidget()
         card.setStyleSheet(
             f"background:{C_SURFACE};border:1px solid {C_BORDER};border-radius:10px;"
@@ -300,239 +418,242 @@ class SslTab(QWidget):
         v = QVBoxLayout(card)
         v.setContentsMargins(22, 20, 22, 20)
         v.setSpacing(14)
-
-        hdr = QHBoxLayout()
-        t = QLabel("PostgreSQL TLS  —  Encrypted Database Connections")
+        t = QLabel(title)
         t.setStyleSheet(
             f"color:{C_TEXT};font-size:15px;font-weight:700;background:transparent;"
         )
-        self.ssl_status_lbl = QLabel("Checking...")
-        self.ssl_status_lbl.setStyleSheet(
-            f"color:{C_TEXT2};font-size:13px;font-weight:700;background:transparent;"
-        )
-        hdr.addWidget(t)
-        hdr.addStretch()
-        hdr.addWidget(self.ssl_status_lbl)
-        v.addLayout(hdr)
+        v.addWidget(t)
         v.addWidget(_sep())
-
-        desc = _lbl(
-            "Encrypts connections between apps and the PostgreSQL server. "
-            "Uses a self-signed RSA certificate valid for 10 years. "
-            "Apps connect with sslmode=require.",
-            C_TEXT3, 12
-        )
-        desc.setWordWrap(True)
-        v.addWidget(desc)
-
-        self.ssl_cert_lbl = _lbl("", C_TEXT3, 11)
-        self.ssl_cert_lbl.setWordWrap(True)
-        v.addWidget(self.ssl_cert_lbl)
-
-        cert_btns = QHBoxLayout()
-        self.btn_gen_cert = _btn("Generate Certificate", C_BLUE, "#3b7de8", h=34)
-        self.btn_ssl_on   = _btn("Enable SSL", "#166534", "#15803d", "#86efac", h=34)
-        self.btn_ssl_off  = _btn("Disable SSL", "#7f1d1d", "#991b1b", "#fca5a5", h=34)
-        self.btn_exp_cert = _btn("Export server.crt", C_SURFACE2, C_BORDER2, C_TEXT2, h=34)
-
-        self.btn_gen_cert.clicked.connect(self._gen_cert)
-        self.btn_ssl_on.clicked.connect(self._enable_ssl)
-        self.btn_ssl_off.clicked.connect(self._disable_ssl)
-        self.btn_exp_cert.clicked.connect(self._exp_cert)
-
-        cert_btns.addWidget(self.btn_gen_cert)
-        cert_btns.addWidget(self.btn_ssl_on)
-        cert_btns.addWidget(self.btn_ssl_off)
-        cert_btns.addWidget(self.btn_exp_cert)
-        cert_btns.addStretch()
-        v.addLayout(cert_btns)
-
-        port = self.config.get("port", 5432)
-        conn_card = QWidget()
-        conn_card.setStyleSheet(
-            f"background:{C_SURFACE2};border:1px solid {C_BORDER2};border-radius:8px;"
-        )
-        cv = QVBoxLayout(conn_card)
-        cv.setContentsMargins(14, 12, 14, 12)
-        cv.setSpacing(8)
-        cv.addWidget(_lbl("CLIENT CONNECTION STRINGS", C_TEXT3, 10))
-        cv.addWidget(_mono_row("URL", f"postgresql://user:pass@pgops.test:{port}/dbname?sslmode=require"))
-        cv.addWidget(_mono_row("Laravel", "DB_SSLMODE=require  (in .env)"))
-        cv.addWidget(_mono_row("psycopg2", "sslmode='require'  (in connect())"))
-        v.addWidget(conn_card)
-
-        note = _lbl(
-            "After enabling SSL, restart the PostgreSQL server for changes to take effect.",
-            C_TEXT3, 11
-        )
-        note.setWordWrap(True)
-        v.addWidget(note)
-
         return card
 
-    # ── Status refresh ─────────────────────────────────────────────────────────
+    # ── Refresh ────────────────────────────────────────────────────────────────
 
     def refresh_status(self):
-        self._update_caddy_status()
+        self._update_mkcert_status()
         self._update_pg_ssl_status()
+        self._update_caddy_status()
+
+    def _update_mkcert_status(self):
+        try:
+            from core.mkcert_manager import (
+                is_available, is_ca_installed, cert_path, key_path, get_cert_info,
+            )
+            binary_ok = is_available()
+            ca_ok     = is_ca_installed() if binary_ok else False
+            cert_ok   = cert_path().exists() and key_path().exists()
+
+            self._mkcert_binary_lbl.setText(
+                f"Binary: {'✓ installed' if binary_ok else '✗ missing'}"
+            )
+            self._mkcert_binary_lbl.setStyleSheet(
+                f"color:{C_GREEN if binary_ok else C_RED};"
+                f"font-size:11px;background:transparent;"
+            )
+
+            self._mkcert_ca_lbl.setText(
+                f"CA: {'✓ trusted' if ca_ok else '✗ not installed'}"
+            )
+            self._mkcert_ca_lbl.setStyleSheet(
+                f"color:{C_GREEN if ca_ok else C_AMBER};"
+                f"font-size:11px;background:transparent;"
+            )
+
+            self._mkcert_cert_lbl.setText(
+                f"Cert: {'✓ generated' if cert_ok else '✗ missing'}"
+            )
+            self._mkcert_cert_lbl.setStyleSheet(
+                f"color:{C_GREEN if cert_ok else C_RED};"
+                f"font-size:11px;background:transparent;"
+            )
+
+            if cert_ok:
+                info = get_cert_info()
+                if info and "expires" in info:
+                    sans_preview = ", ".join(info.get("sans", [])[:4])
+                    if len(info.get("sans", [])) > 4:
+                        sans_preview += f" +{len(info['sans']) - 4} more"
+                    self._cert_details_lbl.setText(
+                        f"Expires: {info['expires']}  ·  SANs: {sans_preview}"
+                    )
+                else:
+                    self._cert_details_lbl.setText("")
+            else:
+                self._cert_details_lbl.setText("")
+
+            all_ok = binary_ok and ca_ok and cert_ok
+            self.btn_mkcert_setup.setVisible(not all_ok)
+            self.btn_mkcert_regen.setEnabled(binary_ok)
+            self.btn_export_ca.setEnabled(ca_ok)
+
+        except Exception as e:
+            self._mkcert_binary_lbl.setText(f"Status error: {e}")
+
+    def _update_pg_ssl_status(self):
+        try:
+            from core.ssl_manager import get_ssl_status
+            from core.mkcert_manager import cert_path, key_path
+            status = get_ssl_status(DATA_DIR)
+
+            if status["enabled"]:
+                self.ssl_status_lbl.setText("● SSL ENABLED")
+                self.ssl_status_lbl.setStyleSheet(
+                    f"color:{C_GREEN};font-size:13px;font-weight:700;background:transparent;"
+                )
+            else:
+                self.ssl_status_lbl.setText("● SSL DISABLED")
+                self.ssl_status_lbl.setStyleSheet(
+                    f"color:{C_RED};font-size:13px;font-weight:700;background:transparent;"
+                )
+
+            cert_ok = cert_path().exists() and key_path().exists()
+            if not cert_ok:
+                self.ssl_cert_lbl.setText(
+                    "mkcert certificate not found — run Full Setup first."
+                )
+            else:
+                self.ssl_cert_lbl.setText(
+                    f"Using: {cert_path()}"
+                )
+        except Exception as e:
+            self.ssl_cert_lbl.setText(f"Error: {e}")
 
     def _update_caddy_status(self):
         if not self._caddy:
             self._caddy_ssl_badge.setText("Caddy not configured")
-            self._caddy_ssl_badge.setStyleSheet(
-                f"color:{C_TEXT3};font-size:11px;background:transparent;"
-            )
-            self._caddy_ca_path_lbl.setText("Caddy manager not available.")
-            self.btn_export_ca.setEnabled(False)
-            self.btn_trust_auto.setEnabled(False)
             return
 
-        status = self._caddy.get_status_detail()
-        caddy_running = status.get("running", False)
-        ca_available  = status.get("ca_available", False)
-        ca_path       = status.get("ca_path", "")
+        running  = self._caddy.is_running()
+        try:
+            from core.mkcert_manager import cert_path, key_path
+            cert_ok = cert_path().exists() and key_path().exists()
+        except Exception:
+            cert_ok = False
 
-        if caddy_running and ca_available:
-            self._caddy_ssl_badge.setText("● HTTPS ACTIVE")
+        if running and cert_ok:
+            self._caddy_ssl_badge.setText("● RUNNING WITH TRUSTED CERT")
             self._caddy_ssl_badge.setStyleSheet(
-                f"color:{C_GREEN};font-size:11px;font-weight:700;background:transparent;"
+                f"color:{C_GREEN};font-size:12px;font-weight:700;background:transparent;"
             )
-        elif caddy_running:
-            self._caddy_ssl_badge.setText("● CADDY RUNNING")
+            if self._caddy:
+                url = self._caddy.landing_url()
+                self._caddy_url_lbl.setText(f"https://pgops.test  →  {url}")
+        elif running:
+            self._caddy_ssl_badge.setText("● RUNNING (no mkcert cert — using Caddy internal CA)")
             self._caddy_ssl_badge.setStyleSheet(
-                f"color:{C_AMBER};font-size:11px;font-weight:700;background:transparent;"
+                f"color:{C_AMBER};font-size:12px;font-weight:700;background:transparent;"
             )
         else:
             self._caddy_ssl_badge.setText("● CADDY STOPPED")
             self._caddy_ssl_badge.setStyleSheet(
-                f"color:{C_RED};font-size:11px;font-weight:700;background:transparent;"
+                f"color:{C_RED};font-size:12px;font-weight:700;background:transparent;"
             )
+            self._caddy_url_lbl.setText("")
 
-        if ca_available and ca_path:
-            self._caddy_ca_path_lbl.setText(
-                f"CA certificate: {ca_path}\n"
-                "Click 'Trust CA (Auto-Install)' to add it to your system trust store, "
-                "or export it for manual installation."
-            )
-            self.btn_export_ca.setEnabled(True)
-            self.btn_trust_auto.setEnabled(True)
-        else:
-            self._caddy_ca_path_lbl.setText(
-                "CA not yet generated. Start Caddy first — it creates the CA automatically."
-            )
-            self.btn_export_ca.setEnabled(False)
-            self.btn_trust_auto.setEnabled(False)
+    # ── mkcert action handlers ─────────────────────────────────────────────────
 
-    def _update_pg_ssl_status(self):
-        try:
-            from core.ssl_manager import get_ssl_status, get_cert_info, is_ssl_configured
-            status    = get_ssl_status(DATA_DIR)
-            cert_info = get_cert_info(BASE_DIR)
-        except Exception as e:
-            self.ssl_cert_lbl.setText(f"Error reading SSL status: {e}")
-            return
+    def _full_setup(self):
+        self.btn_mkcert_setup.setEnabled(False)
+        self._mkcert_prog.setVisible(True)
+        self._mkcert_prog.setValue(0)
 
-        if status["enabled"]:
-            self.ssl_status_lbl.setText("● SSL ENABLED")
-            self.ssl_status_lbl.setStyleSheet(
-                f"color:{C_GREEN};font-size:13px;font-weight:700;background:transparent;"
-            )
-        else:
-            self.ssl_status_lbl.setText("● SSL DISABLED")
-            self.ssl_status_lbl.setStyleSheet(
-                f"color:{C_RED};font-size:13px;font-weight:700;background:transparent;"
-            )
-
-        if cert_info and "expires" in cert_info:
-            self.ssl_cert_lbl.setText(
-                f"Subject: {cert_info.get('subject', '')}  ·  "
-                f"Expires: {cert_info.get('expires', '')}  ·  "
-                f"Serial: {cert_info.get('serial', '')}"
-            )
-        elif cert_info and "error" in cert_info:
-            self.ssl_cert_lbl.setText(f"Cert error: {cert_info['error']}")
-        else:
-            try:
-                if not is_ssl_configured(BASE_DIR):
-                    self.ssl_cert_lbl.setText("No certificate found — generate one first.")
-            except Exception:
-                pass
-
-    # ── Caddy CA handlers ──────────────────────────────────────────────────────
-
-    def _trust_caddy_ca_auto(self):
-        if not self._caddy:
-            QMessageBox.warning(self, "Caddy Not Available", "Caddy manager not configured.")
-            return
-        self.btn_trust_auto.setEnabled(False)
-        self.btn_trust_auto.setText("Trusting...")
-
-        w = _WorkerThread(lambda: self._caddy.install_ca())
+        def fn(prog_cb):
+            from core.mkcert_manager import setup_mkcert
+            return setup_mkcert(progress_callback=prog_cb, log_fn=self._on_log)
 
         def done(ok, msg):
-            self.btn_trust_auto.setEnabled(True)
-            self.btn_trust_auto.setText("Trust CA (Auto-Install)")
-            self._on_log(f"[SSL] {msg}")
+            self._mkcert_prog.setVisible(False)
+            self.btn_mkcert_setup.setEnabled(True)
+            self._on_log(f"[mkcert] {msg}")
+            self.refresh_status()
             if ok:
                 QMessageBox.information(
-                    self, "CA Trusted",
-                    f"{msg}\n\nRestart your browser for the change to take effect."
+                    self, "mkcert Setup Complete",
+                    f"{msg}\n\n"
+                    "Your browser will now trust pgops.test and all app subdomains "
+                    "without any certificate warnings.\n\n"
+                    "For other devices, click 'Export CA for Clients' and follow "
+                    "the import instructions in the tab below."
                 )
             else:
-                QMessageBox.warning(
-                    self, "Auto-Trust Failed",
-                    f"{msg}\n\nUse the manual instructions instead."
-                )
-            self._update_caddy_status()
+                QMessageBox.critical(self, "Setup Failed", msg)
 
+        w = _Worker(fn)
+        w.done.connect(done)
+        w.progress.connect(self._mkcert_prog.setValue)
+        w.start()
+        self._workers.append(w)
+
+    def _regen_cert(self):
+        self.btn_mkcert_regen.setEnabled(False)
+
+        def fn(_prog):
+            from core.mkcert_manager import generate_cert
+            return generate_cert(log_fn=self._on_log)
+
+        def done(ok, msg):
+            self.btn_mkcert_regen.setEnabled(True)
+            self._on_log(f"[mkcert] {msg}")
+            self.refresh_status()
+            # If Caddy is running, reload it to pick up the new cert
+            if ok and self._caddy and self._caddy.is_running():
+                ok2, msg2 = self._caddy.reload()
+                self._on_log(f"[Caddy] {msg2}")
+            if not ok:
+                QMessageBox.warning(self, "Regenerate Failed", msg)
+
+        w = _Worker(fn)
         w.done.connect(done)
         w.start()
         self._workers.append(w)
 
-    def _export_caddy_ca(self):
-        if not self._caddy:
-            return
+    def _export_ca(self):
         dest, _ = QFileDialog.getSaveFileName(
-            self, "Export Caddy CA Certificate", "pgops-caddy-ca.crt",
+            self, "Export CA Certificate", "pgops-ca.crt",
             "Certificate Files (*.crt *.pem);;All Files (*)"
         )
         if dest:
-            ok, msg = self._caddy.export_ca(dest)
-            self._on_log(f"[SSL] {msg}")
+            from core.mkcert_manager import export_ca_cert
+            ok, msg = export_ca_cert(dest, log_fn=self._on_log)
+            self._on_log(f"[mkcert] {msg}")
             if ok:
-                QMessageBox.information(self, "CA Exported", f"CA certificate saved to:\n{dest}")
+                QMessageBox.information(
+                    self, "CA Exported",
+                    f"CA certificate saved to:\n{dest}\n\n"
+                    "Import this on other devices using the instructions below."
+                )
             else:
                 QMessageBox.warning(self, "Export Failed", msg)
 
-    # ── PostgreSQL SSL handlers ────────────────────────────────────────────────
-
-    def _gen_cert(self):
-        self.btn_gen_cert.setEnabled(False)
-
-        # BASE_DIR is the appdata dir; certs go in BASE_DIR/ssl/
-        w = _WorkerThread(lambda: __import__("core.ssl_manager", fromlist=["generate_certificate"]).generate_certificate(BASE_DIR))
-
-        def done(ok, msg):
-            self.btn_gen_cert.setEnabled(True)
-            self._on_log(msg)
-            self._update_pg_ssl_status()
-            if not ok:
-                QMessageBox.critical(self, "Error", msg)
-
-        w.done.connect(done)
-        w.start()
-        self._workers.append(w)
+    # ── PostgreSQL SSL action handlers ─────────────────────────────────────────
 
     def _enable_ssl(self):
-        from core.ssl_manager import is_ssl_configured, enable_ssl
-        if not is_ssl_configured(BASE_DIR):
-            QMessageBox.warning(self, "No Certificate", "Generate a certificate first.")
-            return
+        try:
+            from core.mkcert_manager import cert_path, key_path
+            if not cert_path().exists() or not key_path().exists():
+                QMessageBox.warning(
+                    self, "No Certificate",
+                    "mkcert certificate not found.\nRun 'Full Setup' first."
+                )
+                return
+        except Exception:
+            pass
+
         if not self._manager.is_initialized():
-            QMessageBox.warning(self, "Not Initialized", "Start the server at least once first.")
+            QMessageBox.warning(
+                self, "Not Initialized",
+                "Start the server at least once before enabling SSL."
+            )
             return
-        # enable_ssl(base_dir, data_dir)
-        ok, msg = enable_ssl(BASE_DIR, DATA_DIR)
+
+        try:
+            from core.mkcert_manager import cert_path as crt_fn, key_path as key_fn
+            from core.ssl_manager import enable_ssl_with_paths
+            ok, msg = enable_ssl_with_paths(DATA_DIR, str(crt_fn()), str(key_fn()))
+        except ImportError:
+            # Fallback to old API if ssl_manager doesn't have the new function
+            from core.ssl_manager import enable_ssl
+            ok, msg = enable_ssl(BASE_DIR, DATA_DIR)
+
         self._on_log(msg)
         self._update_pg_ssl_status()
         if ok:
@@ -548,21 +669,3 @@ class SslTab(QWidget):
         ok, msg = disable_ssl(DATA_DIR)
         self._on_log(msg)
         self._update_pg_ssl_status()
-
-    def _exp_cert(self):
-        from core.ssl_manager import is_ssl_configured, export_ca_cert
-        if not is_ssl_configured(BASE_DIR):
-            QMessageBox.warning(self, "No Certificate", "Generate a certificate first.")
-            return
-        dest, _ = QFileDialog.getSaveFileName(
-            self, "Export PostgreSQL Certificate", "pgops-server.crt",
-            "Certificate Files (*.crt);;All Files (*)"
-        )
-        if dest:
-            # export_ca_cert(base_dir, dest)
-            ok, msg = export_ca_cert(BASE_DIR, dest)
-            self._on_log(msg)
-            if ok:
-                QMessageBox.information(self, "Exported", msg)
-            else:
-                QMessageBox.warning(self, "Export Failed", msg)
