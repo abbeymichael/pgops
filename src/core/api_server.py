@@ -179,7 +179,6 @@ class APIServer:
 
     def _deploy(self, body: dict, **_):
         from core.app_manager import provision_app, upsert_app
-        from core.caddy_manager import generate_caddyfile
         from core.frankenphp_manager import get_frankenphp_bin
 
         slug        = body.get("slug", "")

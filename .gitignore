@@ -9,3 +9,5 @@ __pycache__/
 /venv/
 /assets/
 /node_modules/
+# Nested repo clone (not a submodule)
+pgops/

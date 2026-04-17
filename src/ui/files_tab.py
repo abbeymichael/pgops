@@ -661,19 +661,27 @@ class FilesTab(QWidget):
             if ok:
                 self.btn_setup.setVisible(False)
                 self._update_status()
+                # Auto-start MinIO right after setup
+                if not self.minio.is_running():
+                    self._start_minio()
             else:
                 QMessageBox.critical(self, "Setup Failed", msg)
 
         w = self._run(fn, done)
         w.progress.connect(self.prog.setValue)
 
+    def _start_minio(self):
+        """Start MinIO server (called automatically after setup)."""
+        def fn(_p):
+            return self.minio.start()
+        def done(ok, msg):
+            self._update_status()
+        self._run(fn, done)
+
     def _open_console(self):
         import webbrowser
-        # Use IP directly — browsers may force HTTPS on .local domains via HSTS
-        # which breaks plain HTTP MinIO console
-        ip = self.minio.get_lan_ip()
-        url = f"http://{ip}:{self.minio.console_port}"
-        webbrowser.open(url)
+        # Use Caddy-managed domain (HTTPS via mkcert) — works on all LAN devices
+        webbrowser.open("https://console.pgops.test")
 
     # ── Bucket operations ─────────────────────────────────────────────────────
 

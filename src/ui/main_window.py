@@ -41,6 +41,13 @@ from core.pgadmin_manager import PgAdminManager
 # Phase 2
 from core.dns_server import DNSServerThread
 from core.caddy_manager import CaddyManager, setup_caddy_binary
+from core.mkcert_manager import (
+    setup_mkcert,
+    install_ca as mkcert_install_ca,
+    generate_cert as mkcert_generate_cert,
+    is_available as mkcert_is_available,
+    is_cert_generated as mkcert_cert_ready,
+)
 from core.frankenphp_manager import (
     AppProcessManager,
     setup_frankenphp_binary,
@@ -150,6 +157,7 @@ class MainWindow(QMainWindow):
             get_apps=load_apps,
             get_host_ip=self.manager.get_lan_ip,
             log_fn=self._log,
+            port=self.config.get("landing_port", 8080),
         )
         self.api_server = APIServer(
             app_registry_fn=load_apps,
@@ -180,12 +188,13 @@ class MainWindow(QMainWindow):
         if self.scheduler.schedule.get("enabled"):
             self.scheduler.start()
 
-        # Staggered Phase 2 startup
-        QTimer.singleShot(500, self._auto_start_mdns)
-        QTimer.singleShot(600, self._start_dns)
-        QTimer.singleShot(700, self._start_landing_server)
-        QTimer.singleShot(800, self._start_api_server)
-        QTimer.singleShot(2000, self._start_caddy_and_apps)
+        # Staggered startup — all services start automatically
+        QTimer.singleShot(500,  self._auto_start_mdns)
+        QTimer.singleShot(600,  self._start_dns)
+        QTimer.singleShot(700,  self._start_landing_server)
+        QTimer.singleShot(800,  self._start_api_server)
+        # mkcert CA + cert first, then Caddy, then apps
+        QTimer.singleShot(1200, self._ensure_mkcert_then_caddy)
 
     # ── Phase 2 startup helpers ───────────────────────────────────────────────
 
@@ -203,16 +212,49 @@ class MainWindow(QMainWindow):
         ok, msg = self.api_server.start()
         self._log(msg)
 
+    def _ensure_mkcert_then_caddy(self):
+        """Ensure mkcert CA+cert are ready, then start Caddy in a background thread."""
+        def _run(_p):
+            # 1. Setup mkcert binary if missing
+            if not mkcert_is_available():
+                ok, msg = setup_mkcert()
+                self._log(f"[mkcert] {msg}")
+                if not ok:
+                    return False, msg
+
+            # 2. Install CA into system trust store
+            ok, msg = mkcert_install_ca(log_fn=self._log)
+            self._log(f"[mkcert] {msg}")
+
+            # 3. Generate cert if not present (non-fatal if it fails)
+            if not mkcert_cert_ready():
+                ok2, msg2 = mkcert_generate_cert(log_fn=self._log)
+                self._log(f"[mkcert] {msg2}")
+
+            return True, "mkcert ready."
+
+        def _done(ok, msg):
+            # Start Caddy + apps after mkcert is ready
+            QTimer.singleShot(200, self._start_caddy_and_apps)
+
+        self._run(_run, _done)
+
     def _start_caddy_and_apps(self):
+        """Start app processes then Caddy (which routes all domains)."""
         apps = load_apps()
+        # Start processes for apps marked running
         running_apps = [a for a in apps if a.get("status") == "running"]
         if running_apps:
             results = self.app_procs.start_all(running_apps)
             for app_id, ok, msg in results:
                 self._log(f"[App:{app_id}] {msg}")
+
         if self.caddy.is_available():
-            ok, msg = self.caddy.start(apps)
+            pgadmin_up = self.pgadmin.is_running() if hasattr(self, 'pgadmin') else False
+            ok, msg = self.caddy.start(apps, pgadmin_running=pgadmin_up)
             self._log(msg)
+            if ok:
+                self._poll()
         else:
             self._log("[Caddy] Binary not found — click Setup Caddy in the Server tab.")
 
@@ -495,24 +537,32 @@ class MainWindow(QMainWindow):
             self._load_databases_async()
             self._backup_tab.refresh_backup_list()
             self._ssl_tab.refresh_status()
-            if not self.minio.is_running() and self.minio.is_binaries_available():
 
+            # Auto-start MinIO if its binaries are ready
+            if not self.minio.is_running() and self.minio.is_binaries_available():
                 def _sm(_p):
                     return self.minio.start()
+                def _sm_done(ok, msg):
+                    self._log(f"[MinIO] {msg}")
+                    # Reload Caddy so MinIO domain is active
+                    if ok and self.caddy.is_running():
+                        self.caddy.reload(apps=load_apps(),
+                                          pgadmin_running=self.pgadmin.is_running())
+                self._run(_sm, _sm_done)
 
-                self._run(_sm, lambda ok, msg: self._log(f"[MinIO] {msg}"))
+            # Auto-start pgAdmin if available
             if not self.pgadmin.is_running() and self.pgadmin.is_available():
-
                 def _spa(_p):
                     return self.pgadmin.start()
+                def _spa_done(ok, msg):
+                    self._log(f"[pgAdmin] {msg}")
+                    self._update_pgadmin_status()
+                    # Reload Caddy to add pgadmin.pgops.test
+                    if ok and self.caddy.is_running():
+                        self.caddy.reload(apps=load_apps(), pgadmin_running=ok)
+                self._run(_spa, _spa_done)
 
-                self._run(
-                    _spa,
-                    lambda ok, msg: (
-                        self._log(f"[pgAdmin] {msg}"),
-                        self._update_pgadmin_status(),
-                    ),
-                )
+            # Start Caddy if not already running
             if not self.caddy.is_running():
                 QTimer.singleShot(500, self._start_caddy_and_apps)
 
@@ -522,6 +572,9 @@ class MainWindow(QMainWindow):
             self.minio.stop()
         if self.pgadmin.is_running():
             self.pgadmin.stop()
+        # Reload Caddy without pgadmin when pgAdmin stops
+        if self.caddy.is_running():
+            self.caddy.reload(apps=load_apps(), pgadmin_running=False)
 
         def fn(_p):
             return self.manager.stop(), ""
@@ -546,7 +599,9 @@ class MainWindow(QMainWindow):
         self._srv_tab.btn_setup.setEnabled(True)
         if ok:
             self._srv_tab.show_warn(False)
-            self._log("Setup complete. Click Start Server.")
+            self._log("PostgreSQL setup complete — starting server automatically...")
+            # Auto-start PostgreSQL right after setup
+            QTimer.singleShot(300, self._start)
         else:
             self._log(f"Setup failed: {msg}")
 
@@ -557,13 +612,28 @@ class MainWindow(QMainWindow):
         self._srv_tab.set_caddy_progress(True, 0)
 
         def fn(pc):
-            return setup_caddy_binary(progress_callback=pc)
+            # Setup Caddy binary
+            ok, msg = setup_caddy_binary(progress_callback=lambda p: pc(p // 2))
+            if not ok:
+                return ok, msg
+            # Then ensure mkcert is ready
+            if not mkcert_is_available():
+                ok2, msg2 = setup_mkcert(progress_callback=lambda p: pc(50 + p // 4))
+                if not ok2:
+                    return True, f"{msg} (mkcert setup failed: {msg2})"
+            ok3, msg3 = mkcert_install_ca(log_fn=self._log)
+            if not mkcert_cert_ready():
+                ok4, msg4 = mkcert_generate_cert(log_fn=self._log)
+            return True, f"{msg} — TLS certificate ready."
 
         def done(ok, msg):
             self._srv_tab.set_caddy_progress(False)
             self._srv_tab.btn_caddy_setup.setEnabled(True)
             self._log(f"[Caddy] {msg}")
             self._poll()
+            # Auto-start Caddy after setup
+            if ok and not self.caddy.is_running():
+                QTimer.singleShot(400, self._start_caddy_and_apps)
 
         w = self._run(fn, done)
         w.progress.connect(lambda v: self._srv_tab.set_caddy_progress(True, v))
@@ -571,10 +641,8 @@ class MainWindow(QMainWindow):
     def _start_caddy(self):
         if not self.caddy.is_available():
             from PyQt6.QtWidgets import QMessageBox
-
             QMessageBox.information(
-                self,
-                "Setup Required",
+                self, "Setup Required",
                 "Click Setup Caddy first to download the binary.",
             )
             return
@@ -582,7 +650,8 @@ class MainWindow(QMainWindow):
 
         def fn(_p):
             apps = load_apps()
-            return self.caddy.start(apps)
+            pgadmin_up = self.pgadmin.is_running()
+            return self.caddy.start(apps, pgadmin_running=pgadmin_up)
 
         def done(ok, msg):
             self._srv_tab.btn_caddy_start.setEnabled(True)
@@ -618,6 +687,9 @@ class MainWindow(QMainWindow):
             self._srv_tab.btn_fphp_setup.setEnabled(True)
             self._log(f"[FrankenPHP] {msg}")
             self._poll()
+            # Auto-start apps after FrankenPHP setup
+            if ok:
+                QTimer.singleShot(400, self._start_all_apps)
 
         w = self._run(fn, done)
         w.progress.connect(lambda v: self._srv_tab.set_fphp_progress(True, v))
@@ -883,6 +955,21 @@ class MainWindow(QMainWindow):
         self._srv_tab.update_pgadmin_status(
             self.pgadmin.is_running(), self.pgadmin.is_available()
         )
+
+    # ── MinIO setup auto-start ─────────────────────────────────────────────────
+
+    def _on_minio_setup_done(self, ok, msg):
+        """Called after MinIO binary setup completes — auto-start MinIO."""
+        self._log(f"[MinIO] {msg}")
+        if ok and not self.minio.is_running():
+            def _sm(_p):
+                return self.minio.start()
+            def _sm_done(ok2, msg2):
+                self._log(f"[MinIO] {msg2}")
+                if ok2 and self.caddy.is_running():
+                    self.caddy.reload(apps=load_apps(),
+                                      pgadmin_running=self.pgadmin.is_running())
+            self._run(_sm, _sm_done)
 
     # ── mDNS ──────────────────────────────────────────────────────────────────
 
