@@ -10,7 +10,7 @@ from typing import Callable, Optional
 
 
 LANDING_HOST = "127.0.0.1"
-LANDING_PORT = 8080
+LANDING_PORT = 8080   # Caddy proxies pgops.test → here; set via config["landing_port"]
 
 _STYLE = """
 <style>
@@ -136,7 +136,7 @@ class _Handler(BaseHTTPRequestHandler):
                 <div class="app-card">
                   <div class="app-name">{app.get("display_name", app["id"])}</div>
                   <div class="app-domain">
-                    <a href="http://{domain}" target="_blank">{domain}</a>
+                    <a href="https://{domain}" target="_blank">{domain}</a>
                   </div>
                   {badge}
                 </div>"""
@@ -185,10 +185,11 @@ class LandingServer:
     Caddy proxies pgops.test → here.
     """
 
-    def __init__(self, get_apps: Callable, get_host_ip: Callable, log_fn=None):
+    def __init__(self, get_apps: Callable, get_host_ip: Callable, log_fn=None, port: int = LANDING_PORT):
         self._get_apps    = get_apps
         self._get_host_ip = get_host_ip
         self._log         = log_fn or print
+        self._port        = port
         self._server: Optional[HTTPServer] = None
         self._thread: Optional[threading.Thread] = None
 
@@ -200,10 +201,11 @@ class LandingServer:
             get_apps    = self._get_apps
             get_host_ip = self._get_host_ip
 
+        port = self._port
         try:
-            self._server = HTTPServer((LANDING_HOST, LANDING_PORT), _H)
+            self._server = HTTPServer((LANDING_HOST, port), _H)
         except OSError as exc:
-            return False, f"Landing server bind failed on port {LANDING_PORT}: {exc}"
+            return False, f"Landing server bind failed on port {port}: {exc}"
 
         self._thread = threading.Thread(
             target=self._server.serve_forever,
@@ -211,7 +213,7 @@ class LandingServer:
             name="PGOps-Landing",
         )
         self._thread.start()
-        msg = f"[Landing] Server running on {LANDING_HOST}:{LANDING_PORT}"
+        msg = f"[Landing] Server running on {LANDING_HOST}:{port}"
         self._log(msg)
         return True, msg
 
