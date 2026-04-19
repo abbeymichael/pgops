@@ -357,7 +357,7 @@ class SslTab(QWidget):
         cv2.addWidget(_lbl("CLIENT CONNECTION STRINGS", C_TEXT3, 10))
         cv2.addWidget(_mono_row(
             "URL",
-            f"postgresql://user:pass@pgops.test:{port}/dbname?sslmode=require"
+            f"postgresql://user:pass@pgops.local:{port}/dbname?sslmode=require"
         ))
         cv2.addWidget(_mono_row("Laravel", "DB_SSLMODE=require  (in .env)"))
         cv2.addWidget(_mono_row("psycopg2", "sslmode='require'  (in connect())"))
@@ -376,7 +376,7 @@ class SslTab(QWidget):
         cv = card.layout()
 
         desc = QLabel(
-            "Caddy uses the same mkcert certificate to serve all *.pgops.test domains over HTTPS. "
+            "Caddy uses the same mkcert certificate to serve all *.pgops.local domains over HTTPS. "
             "No additional configuration is required — once mkcert setup is complete and "
             "Caddy is running, all apps are available over HTTPS."
         )
@@ -398,10 +398,10 @@ class SslTab(QWidget):
 
         btns = QHBoxLayout()
         self.btn_open_https = _btn(
-            "Open https://pgops.test →", "#166534", "#15803d", "#86efac", h=34
+            "Open https://pgops.local →", "#166534", "#15803d", "#86efac", h=34
         )
         self.btn_open_https.clicked.connect(
-            lambda: webbrowser.open("https://pgops.test")
+            lambda: webbrowser.open("https://pgops.local")
         )
         btns.addWidget(self.btn_open_https)
         btns.addStretch()
@@ -534,7 +534,7 @@ class SslTab(QWidget):
             )
             if self._caddy:
                 url = self._caddy.console_url()
-                self._caddy_url_lbl.setText(f"https://pgops.test  →  {url}")
+                self._caddy_url_lbl.setText(f"https://pgops.local  →  {url}")
         elif running:
             self._caddy_ssl_badge.setText("● RUNNING (no mkcert cert — using Caddy internal CA)")
             self._caddy_ssl_badge.setStyleSheet(
@@ -575,7 +575,7 @@ class SslTab(QWidget):
                 QMessageBox.information(
                     self, "mkcert Setup Complete",
                     f"{msg}\n\n"
-                    "Your browser will now trust pgops.test and all app subdomains "
+                    "Your browser will now trust pgops.local and all app subdomains "
                     "without any certificate warnings.\n\n"
                     "For other devices, click 'Export CA for Clients' and follow "
                     "the import instructions in the tab below."

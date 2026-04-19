@@ -99,7 +99,7 @@ def _run_mkcert(*args, log_fn=None) -> tuple[bool, str]:
 
 def generate_certificate(log_fn=None) -> tuple[bool, str]:
     """
-    Use mkcert to generate a certificate that covers pgops.test, all its
+    Use mkcert to generate a certificate that covers pgops.local, all its
     subdomains, localhost, and the current LAN IPs.
 
     Output is written directly to:
@@ -111,8 +111,8 @@ def generate_certificate(log_fn=None) -> tuple[bool, str]:
     """
     # Build SAN list
     domains = [
-        "pgops.test",
-        "*.pgops.test",
+        "pgops.local",
+        "*.pgops.local",
         "localhost",
         "127.0.0.1",
     ]

@@ -369,7 +369,7 @@ def provision_app(
     cfg = admin_config or {}
     app_folder = str(get_apps_dir() / slug)
     internal_port = get_next_port()
-    domain = f"{slug}.pgops.test"
+    domain = f"{slug}.pgops.local"
     db_name = f"{slug}_db"
     db_user = f"{slug}_user"
     db_password = generate_password()
@@ -493,18 +493,18 @@ def provision_app(
                 "APP_DEBUG": "false",
                 "APP_URL": f"http://{domain}",
                 "DB_CONNECTION": "pgsql",
-                "DB_HOST": "pgops.test",
+                "DB_HOST": "pgops.local",
                 "DB_PORT": "5432",
                 "DB_DATABASE": db_name,
                 "DB_USERNAME": db_user,
                 "DB_PASSWORD": db_password,
-                "DB_SSLMODE": "require",
+                #"DB_SSLMODE": "require",
                 "FILESYSTEM_DISK": "s3",
                 "AWS_ACCESS_KEY_ID": access_key,
                 "AWS_SECRET_ACCESS_KEY": secret_key,
                 "AWS_DEFAULT_REGION": "us-east-1",
                 "AWS_BUCKET": bucket_name,
-                "AWS_ENDPOINT": "http://pgops.test:9000",
+                "AWS_ENDPOINT": "http://pgops.local:9000",
                 "AWS_USE_PATH_STYLE_ENDPOINT": "true",
             },
         )

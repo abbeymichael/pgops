@@ -36,12 +36,12 @@ PGOps is a desktop application that bundles PostgreSQL, MinIO object storage, pg
 - Embedded PostgreSQL 16.2 — downloads and installs binaries on first run
 - MinIO S3-compatible object storage with per-bucket access keys
 - pgAdmin 4 web UI with auto-configured credentials
-- Caddy reverse proxy routing `*.pgops.test` to deployed apps
+- Caddy reverse proxy routing `*.pgops.local` to deployed apps
 - FrankenPHP server for running Laravel applications
 
 **Networking**
-- mDNS broadcasting (`pgops.test`) — works on LAN and mobile hotspot without DNS server config
-- Built-in DNS server resolving `*.pgops.test` — point other devices at the host IP once and all subdomains work
+- mDNS broadcasting (`pgops.local`) — works on LAN and mobile hotspot without DNS server config
+- Built-in DNS server resolving `*.pgops.local` — point other devices at the host IP once and all subdomains work
 - Windows Mobile Hotspot control via WinRT (start/stop from within the app)
 - Network interface detection with hotspot, LAN, and Wi-Fi classification
 - IP pinning — lock to a specific interface so connection strings stay stable
@@ -67,7 +67,7 @@ PGOps is a desktop application that bundles PostgreSQL, MinIO object storage, pg
 **Developer Tools**
 - `pgops` CLI for scripted deployments, database management, and log streaming
 - Internal REST API on `127.0.0.1:7420` (LAN-isolated)
-- Landing page server at `pgops.test` listing deployed apps and DNS setup instructions
+- Landing page server at `pgops.local` listing deployed apps and DNS setup instructions
 - QR code generation for device onboarding
 
 **Platform**
@@ -148,7 +148,7 @@ Double-click `PGOps.app`. On first launch macOS may show a Gatekeeper warning; r
 
    | Field | Default |
    |-------|---------|
-   | Host | your LAN IP or `pgops.test` |
+   | Host | your LAN IP or `pgops.local` |
    | Port | `5432` |
    | Username | `postgres` |
    | Password | `postgres` |
@@ -219,9 +219,9 @@ PGOps Application
 ├── pgAdmin 4              — started as a child process via its bundled Python
 ├── Caddy                  — reverse proxy, config regenerated from apps.json
 ├── FrankenPHP             — one process per deployed Laravel app
-├── DNS Server             — dnslib UDP server, resolves *.pgops.test → host IP
+├── DNS Server             — dnslib UDP server, resolves *.pgops.local → host IP
 ├── mDNS Broadcaster       — zeroconf, publishes pgops.local on the LAN
-├── Landing Server         — tiny stdlib HTTP server on port 8080 (pgops.test root)
+├── Landing Server         — tiny stdlib HTTP server on port 8080 (pgops.local root)
 ├── API Server             — stdlib HTTP server on 127.0.0.1:7420 (CLI target)
 └── Backup Scheduler       — daemon thread, runs pg_dump on a cron-like schedule
 ```
@@ -247,7 +247,7 @@ src/
     frankenphp_manager.py   FrankenPHP binary setup and per-app process management
     app_manager.py          App registry (apps.json), provisioning, git pull, deletion
     api_server.py           Internal REST API (127.0.0.1:7420)
-    landing_server.py       pgops.test root landing page
+    landing_server.py       pgops.local root landing page
     dns_server.py           dnslib DNS server thread
     mdns.py                 zeroconf mDNS broadcaster
     network_info.py         Network interface discovery and classification
@@ -432,9 +432,9 @@ The internal REST API binds exclusively to `127.0.0.1:7420` and is not reachable
 
 ## Network & DNS
 
-### mDNS (pgops.test)
+### mDNS (pgops.local)
 
-PGOps broadcasts itself as `pgops.test` using mDNS (Zeroconf). On most platforms this works without any configuration:
+PGOps broadcasts itself as `pgops.local` using mDNS (Zeroconf). On most platforms this works without any configuration:
 
 - Windows 10/11: native support
 - macOS / iOS: native support
@@ -443,9 +443,9 @@ PGOps broadcasts itself as `pgops.test` using mDNS (Zeroconf). On most platforms
 
 ### DNS Server
 
-For devices where mDNS does not work (Android, some corporate networks), PGOps runs a DNS server that resolves `*.pgops.test` to the host IP. Point any device's DNS to the PGOps host IP and all subdomains resolve automatically.
+For devices where mDNS does not work (Android, some corporate networks), PGOps runs a DNS server that resolves `*.pgops.local` to the host IP. Point any device's DNS to the PGOps host IP and all subdomains resolve automatically.
 
-The DNS server tries to bind to port 53. If that fails due to insufficient privileges it falls back to port 5353. The DNS tab shows the active port and per-platform setup instructions, including a QR code linking to `http://pgops.test` for easy device onboarding.
+The DNS server tries to bind to port 53. If that fails due to insufficient privileges it falls back to port 5353. The DNS tab shows the active port and per-platform setup instructions, including a QR code linking to `http://pgops.local` for easy device onboarding.
 
 ### Windows Hotspot
 
@@ -467,7 +467,7 @@ netsh advfirewall firewall add rule name="PGOps" dir=in action=allow protocol=TC
 
 PGOps can generate a self-signed RSA-2048 certificate valid for 10 years using the `cryptography` Python package (no OpenSSL binary required).
 
-The certificate includes Subject Alternative Names for `pgops.test`, `localhost`, `127.0.0.1`, and the current LAN IP.
+The certificate includes Subject Alternative Names for `pgops.local`, `localhost`, `127.0.0.1`, and the current LAN IP.
 
 **Enable SSL:**
 1. Go to the **SSL / TLS** tab.
@@ -527,12 +527,12 @@ Apps are deployed through the **Apps** tab using the Deploy Wizard.
 5. Runs `php artisan key:generate`.
 6. Runs `php artisan migrate --force`.
 7. Starts a FrankenPHP process serving the app on an internal port.
-8. Reloads Caddy so `<slug>.pgops.test` routes to the app.
+8. Reloads Caddy so `<slug>.pgops.local` routes to the app.
 
 **Requirements:**
 - FrankenPHP binary must be set up first (click **Setup FrankenPHP** on the Server tab).
 - Caddy binary must be set up first (click **Setup Caddy** on the Server tab).
-- The DNS server or mDNS must be running so `<slug>.pgops.test` resolves on client devices.
+- The DNS server or mDNS must be running so `<slug>.pgops.local` resolves on client devices.
 
 **App management:**
 - Start, stop, restart individual apps from the Apps tab.
@@ -565,13 +565,13 @@ AWS_ACCESS_KEY_ID=<access_key>
 AWS_SECRET_ACCESS_KEY=<secret_key>
 AWS_DEFAULT_REGION=us-east-1
 AWS_BUCKET=<bucket_name>
-AWS_ENDPOINT=http://pgops.test:9000
+AWS_ENDPOINT=http://pgops.local:9000
 AWS_USE_PATH_STYLE_ENDPOINT=true
 ```
 
 The MinIO web console is available at `http://<host_ip>:9001`. Use the admin username and password from your PGOps settings (same as PostgreSQL admin credentials by default).
 
-**Note:** Use the direct IP address for the MinIO console URL rather than `pgops.test` — browsers may enforce HTTPS on `.local`/`.test` domains via HSTS, which breaks plain HTTP connections.
+**Note:** Use the direct IP address for the MinIO console URL rather than `pgops.local` — browsers may enforce HTTPS on `.local`/`.local` domains via HSTS, which breaks plain HTTP connections.
 
 ---
 
@@ -587,7 +587,7 @@ Check the **Log** tab. Common causes:
 
 Click **Reset & Restart** on the Server tab. This deletes pgAdmin's SQLite database and restarts it fresh. The default credentials are `admin@pgops.com` / `pgopsadmin`.
 
-**pgops.test does not resolve**
+**pgops.local does not resolve**
 
 - Ensure the mDNS broadcaster is running (green status on the Network tab).
 - On Windows, make sure the Windows Firewall allows UDP on port 5353.
@@ -602,7 +602,7 @@ Click **Reset & Restart** on the Server tab. This deletes pgAdmin's SQLite datab
 
 **MinIO console opens but shows a connection error**
 
-Use the direct IP address (`http://192.168.x.x:9001`) rather than `pgops.test:9001`. Browsers enforce HTTPS on `.test` domains, breaking HTTP connections to the console.
+Use the direct IP address (`http://192.168.x.x:9001`) rather than `pgops.local:9001`. Browsers enforce HTTPS on `.local` domains, breaking HTTP connections to the console.
 
 **Master password forgotten**
 

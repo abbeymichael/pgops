@@ -1,6 +1,6 @@
 """
 mdns.py
-Broadcasts this machine as 'pgops.test' on the LAN using mDNS (Zeroconf).
+Broadcasts this machine as 'pgops.local' on the LAN using mDNS (Zeroconf).
 
 FIXES:
 - ServiceInfo server= field now correctly ends with ".local." (required by zeroconf)
@@ -22,7 +22,7 @@ logging.getLogger("zeroconf").setLevel(logging.ERROR)
 
 class MDNSBroadcaster:
     """
-    Registers this machine as 'pgops.test' on the local network.
+    Registers this machine as 'pgops.local' on the local network.
     Also registers a PostgreSQL service record.
     """
 
@@ -75,7 +75,7 @@ class MDNSBroadcaster:
                 self._running = True
 
             self._log(f"[mDNS] Broadcasting as {self.HOSTNAME}.local → {ip}:{self.port}")
-            return True, f"pgops.test active → {ip}"
+            return True, f"pgops.local active → {ip}"
 
         except ImportError:
             return False, (
@@ -164,10 +164,10 @@ def verify_mdns_resolution(
         ip = socket.getaddrinfo(hostname, None, socket.AF_INET)[0][4][0]
         return True, f"{hostname} resolves to {ip}"
     except Exception as e:
-        # Also try .test suffix
+        # Also try .local suffix
         try:
-            ip2 = socket.getaddrinfo("pgops.test", None, socket.AF_INET)[0][4][0]
-            return True, f"pgops.test resolves to {ip2}"
+            ip2 = socket.getaddrinfo("pgops.local", None, socket.AF_INET)[0][4][0]
+            return True, f"pgops.local resolves to {ip2}"
         except Exception:
             pass
         return False, f"Could not resolve {hostname}: {e}"

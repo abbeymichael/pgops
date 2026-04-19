@@ -23,7 +23,7 @@ Cert location (fixed, shared by all consumers):
 
 On LAN devices:
   - export_ca_cert() copies rootCA.pem so they can install it once
-  - After that, all *.pgops.test domains are trusted automatically
+  - After that, all *.pgops.local domains are trusted automatically
 """
 
 import os
@@ -231,7 +231,7 @@ def setup_mkcert(
 
     # ── Step 3: certificate ───────────────────────────────────────────────
     if log_fn:
-        log_fn("[mkcert] Generating certificate for pgops.test …")
+        log_fn("[mkcert] Generating certificate for pgops.local …")
     ok3, msg3 = generate_cert(log_fn=log_fn)
     if log_fn:
         log_fn(f"[mkcert] {msg3}")
@@ -346,7 +346,7 @@ def install_ca(log_fn: Optional[Callable] = None) -> tuple[bool, str]:
         if r.returncode == 0:
             return True, (
                 "mkcert CA installed in system trust store. "
-                "Browsers will trust pgops.test automatically."
+                "Browsers will trust pgops.local automatically."
             )
         return False, f"mkcert -install failed (rc={r.returncode}):\n{out}"
     except Exception as exc:
@@ -384,7 +384,7 @@ def generate_cert(
 ) -> tuple[bool, str]:
     """
     Generate a certificate signed by the mkcert local CA covering:
-      - pgops.test, *.pgops.test (wildcard for all app subdomains)
+      - pgops.local, *.pgops.local (wildcard for all app subdomains)
       - localhost, 127.0.0.1, ::1
       - All current LAN IPs (discovered via network_info)
       - 192.168.137.1 (common Windows hotspot gateway)
@@ -409,8 +409,8 @@ def generate_cert(
 
     # Build SAN list — order matters for the cert's Common Name (first entry)
     domains: list[str] = [
-        "pgops.test",
-        "*.pgops.test",
+        "pgops.local",
+        "*.pgops.local",
         "localhost",
         "127.0.0.1",
         "::1",
@@ -488,7 +488,7 @@ def export_ca_cert(
 ) -> tuple[bool, str]:
     """
     Copy rootCA.pem to dest_path so LAN devices can install it once
-    and trust all *.pgops.test domains automatically.
+    and trust all *.pgops.local domains automatically.
 
     Accepts an optional log_fn so it can be called from ssl_manager and
     tab_ssl with a consistent signature.
@@ -560,7 +560,7 @@ def get_cert_info() -> dict:
 
         return {
             "expires": exp,
-            "subject": cn_attrs[0].value if cn_attrs else "pgops.test",
+            "subject": cn_attrs[0].value if cn_attrs else "pgops.local",
             "serial":  str(cert.serial_number)[:12],
             "sans":    sans,   # list — used by tab_ssl for SAN preview
         }

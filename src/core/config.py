@@ -36,7 +36,7 @@ DEFAULT_CONFIG = {
     "caddy_http_port":  80,
     "caddy_https_port": 443,
 
-    # Internal landing-page server (Caddy proxies pgops.test → here)
+    # Internal landing-page server (Caddy proxies pgops.local → here)
     "landing_port": 8080,
 
     # MinIO ports (direct binary, Caddy proxies subdomains to these)

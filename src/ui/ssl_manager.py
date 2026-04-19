@@ -131,7 +131,7 @@ def _set_ssl_conf_paths(
 
 # ── Original API (preserved for backwards compatibility) ───────────────────────
 
-def generate_certificate(base_dir: Path, hostname: str = "pgops.test") -> tuple[bool, str]:
+def generate_certificate(base_dir: Path, hostname: str = "pgops.local") -> tuple[bool, str]:
     """
     Generate a self-signed TLS certificate valid for 10 years.
     Prefer using mkcert_manager.generate_cert() for browser-trusted certs.

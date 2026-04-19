@@ -5,12 +5,12 @@ Manages the Caddy reverse proxy for PGOps.
 Architecture (post-mkcert migration):
   - Caddy uses `tls <cert> <key>` pointing to mkcert-issued certificate
   - mkcert CA is trusted system-wide → zero browser warnings on LAN
-  - Every service gets its own subdomain under pgops.test:
-      pgops.test              → landing page  (port 8080)
-      minio.pgops.test        → MinIO API     (port 9000)
-      console.pgops.test      → MinIO Console (port 9001)
-      pgadmin.pgops.test      → pgAdmin       (port 5050)
-      <app>.pgops.test        → Laravel apps  (port 8081+)
+  - Every service gets its own subdomain under pgops.local:
+      pgops.local              → landing page  (port 8080)
+      minio.pgops.local        → MinIO API     (port 9000)
+      console.pgops.local      → MinIO Console (port 9001)
+      pgadmin.pgops.local      → pgAdmin       (port 5050)
+      <app>.pgops.local        → Laravel apps  (port 8081+)
   - HTTP is redirected to HTTPS automatically
   - Caddy admin API on 127.0.0.1:2019 for zero-downtime reloads
   - Caddy is NOT assumed to be running as admin; ports ≥1024 are used
@@ -222,7 +222,7 @@ def generate_caddyfile(
     --------------------
     - Default http_port=8080 and https_port=8443 (both ≥1024, no root needed)
     - HTTP redirect blocks include the explicit port when not 80/443 so that
-      Caddy's site matcher fires correctly (e.g. http://pgops.test:8080)
+      Caddy's site matcher fires correctly (e.g. http://pgops.local:8080)
     - `tls internal` is safe on non-standard ports; Caddy issues its own cert
       and stores it under caddy_data_dir
     - The `pki` global block is emitted only in internal-CA mode so that
@@ -243,18 +243,18 @@ def generate_caddyfile(
     # port 80 (which needs root on Linux/macOS) and the matcher won't fire for
     # the actual traffic arriving on http_port.
     if http_port == 80:
-        http_root = "http://pgops.test"
-        http_wild = "http://*.pgops.test"
+        http_root = "http://pgops.local"
+        http_wild = "http://*.pgops.local"
     else:
-        http_root = f"http://pgops.test:{http_port}"
-        http_wild = f"http://*.pgops.test:{http_port}"
+        http_root = f"http://pgops.local:{http_port}"
+        http_wild = f"http://*.pgops.local:{http_port}"
 
     # Redirect target: always go to HTTPS. Include port only when non-standard.
     if https_port == 443:
-        https_root_target = "https://pgops.test{uri}"
+        https_root_target = "https://pgops.local{uri}"
         https_wild_target = "https://{host}{uri}"
     else:
-        https_root_target = f"https://pgops.test:{https_port}{{uri}}"
+        https_root_target = f"https://pgops.local:{https_port}{{uri}}"
         https_wild_target = f"https://{{host}}:{https_port}{{uri}}"
 
     # ── Global block ────────────────────────────────────────────────────────
@@ -294,7 +294,7 @@ def generate_caddyfile(
     # ── Helper to emit a single site block ──────────────────────────────────
     def site_block(subdomain: str, upstream_port: int) -> list[str]:
         """Return lines for one HTTPS reverse-proxy site block."""
-        host = f"{subdomain}:{https_port}" if subdomain else f"pgops.test:{https_port}"
+        host = f"{subdomain}:{https_port}" if subdomain else f"pgops.local:{https_port}"
         return [
             f"{host} {{",
             tls_dir,
@@ -303,24 +303,24 @@ def generate_caddyfile(
             "",
         ]
 
-    # ── pgops.test root (landing page) ──────────────────────────────────────
+    # ── pgops.local root (landing page) ──────────────────────────────────────
     lines += [
-        f"pgops.test:{https_port} {{",
+        f"pgops.local:{https_port} {{",
         tls_dir,
         f"    reverse_proxy 127.0.0.1:{landing_port}",
         "}",
         "",
     ]
 
-    # ── minio.pgops.test → MinIO API ────────────────────────────────────────
-    lines += site_block("minio.pgops.test", minio_api_port)
+    # ── minio.pgops.local → MinIO API ────────────────────────────────────────
+    lines += site_block("minio.pgops.local", minio_api_port)
 
-    # ── console.pgops.test → MinIO Console ──────────────────────────────────
-    lines += site_block("console.pgops.test", minio_console_port)
+    # ── console.pgops.local → MinIO Console ──────────────────────────────────
+    lines += site_block("console.pgops.local", minio_console_port)
 
-    # ── pgadmin.pgops.test → pgAdmin (only when running) ────────────────────
+    # ── pgadmin.pgops.local → pgAdmin (only when running) ────────────────────
     if pgadmin_enabled:
-        lines += site_block("pgadmin.pgops.test", pgadmin_port)
+        lines += site_block("pgadmin.pgops.local", pgadmin_port)
 
     # ── App subdomains ───────────────────────────────────────────────────────
     # Stopped apps intentionally get a 502 — the domain is still routed so the
@@ -525,13 +525,13 @@ class CaddyManager:
                 self._log(
                     f"[Caddy] Running — "
                     f"HTTP:{self.http_port} HTTPS:{self.https_port} TLS:{tls_mode}\n"
-                    f"[Caddy] pgops.test | minio.pgops.test | console.pgops.test"
-                    + (" | pgadmin.pgops.test" if pgadmin_running else "")
+                    f"[Caddy] pgops.local | minio.pgops.local | console.pgops.local"
+                    + (" | pgadmin.pgops.local" if pgadmin_running else "")
                     + (f" | +{app_count} app(s)" if app_count else "")
                 )
                 return True, (
                     f"Caddy started ({tls_mode}). "
-                    f"Domains: pgops.test, *.pgops.test"
+                    f"Domains: pgops.local, *.pgops.local"
                 )
 
         # Timed out — kill the stray process so we don't leave it dangling.
@@ -703,8 +703,8 @@ class CaddyManager:
 
     def console_url(self) -> str:
         if self.https_port == 443:
-            return "https://pgops.test"
-        return f"https://pgops.test:{self.https_port}"
+            return "https://pgops.local"
+        return f"https://pgops.local:{self.https_port}"
 
     # ── Legacy compat (used by tab_ssl for CA export) ─────────────────────────
 

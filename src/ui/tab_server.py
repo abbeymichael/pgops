@@ -442,7 +442,7 @@ class ServerTab(QWidget):
         url_key.setStyleSheet(
             f"color:{C_TEXT3};font-size:11px;background:transparent;"
         )
-        self._pga_url = QLabel("http://pgops.test:5050")
+        self._pga_url = QLabel("http://pgops.local:5050")
         self._pga_url.setStyleSheet(
             f"color:{C_BLUE};font-family:'Consolas','Courier New',monospace;"
             f"font-size:12px;background:transparent;"
@@ -532,7 +532,7 @@ class ServerTab(QWidget):
         info = QHBoxLayout()
         info.setSpacing(20)
         info_lbl = QLabel(
-            "Routes  *.pgops.test → app servers  ·  Listens on port 80"
+            "Routes  *.pgops.local → app servers  ·  Listens on port 80"
         )
         info_lbl.setStyleSheet(
             f"color:{C_TEXT3};font-family:'Consolas','Courier New',monospace;"
