@@ -13,6 +13,8 @@ Architecture (post-mkcert migration):
       <app>.pgops.test        → Laravel apps  (port 8081+)
   - HTTP is redirected to HTTPS automatically
   - Caddy admin API on 127.0.0.1:2019 for zero-downtime reloads
+  - Caddy is NOT assumed to be running as admin; ports ≥1024 are used
+    by default so no elevated privileges are needed
 """
 
 import os
@@ -198,9 +200,9 @@ def setup_caddy_binary(progress_callback=None) -> tuple[bool, str]:
 
 def generate_caddyfile(
     apps: list,
-    http_port:    int = 80,
-    https_port:   int = 443,
-    landing_port: int = 8080,
+    http_port:    int = 8080,
+    https_port:   int = 8443,
+    landing_port: int = 8081,
     admin_port:   int = 2019,
     minio_api_port:     int = 9000,
     minio_console_port: int = 9001,
@@ -211,56 +213,95 @@ def generate_caddyfile(
 ) -> str:
     """
     Generate a Caddyfile that:
-      1. Redirects all HTTP → HTTPS
-      2. Uses the mkcert cert+key for every HTTPS site
+      1. Redirects all HTTP → HTTPS (port-aware for non-standard ports)
+      2. Uses the mkcert cert+key when available, or `tls internal` as fallback
       3. Routes every known service subdomain
       4. Routes every deployed app subdomain
 
-    If cert_file/key_file are not provided, falls back to `tls internal`
-    (Caddy's built-in CA — requires manual trust on each device).
+    Non-admin mode notes
+    --------------------
+    - Default http_port=8080 and https_port=8443 (both ≥1024, no root needed)
+    - HTTP redirect blocks include the explicit port when not 80/443 so that
+      Caddy's site matcher fires correctly (e.g. http://pgops.test:8080)
+    - `tls internal` is safe on non-standard ports; Caddy issues its own cert
+      and stores it under caddy_data_dir
+    - The `pki` global block is emitted only in internal-CA mode so that
+      Caddy's self-managed CA is named consistently ("PGOps Local CA")
+    - `auto_https off` is NOT set — we still want HTTPS; we just bind on a
+      non-privileged port
     """
-    # Determine TLS directive
-    if cert_file and key_file:
-        tls_line = f"    tls {cert_file} {key_file}"
-        tls_mode = "mkcert"
-    else:
-        tls_line = "    tls internal"
-        tls_mode = "internal"
-
     caddy_data = str(get_caddy_data_dir()).replace("\\", "/")
-    cert_f     = cert_file.replace("\\", "/") if cert_file else ""
-    key_f      = key_file.replace("\\", "/")  if key_file  else ""
-    tls_dir    = f"    tls {cert_f} {key_f}" if (cert_f and key_f) else "    tls internal"
+    cert_f = cert_file.replace("\\", "/") if cert_file else ""
+    key_f  = key_file.replace("\\", "/")  if key_file  else ""
 
+    using_mkcert = bool(cert_f and key_f)
+    tls_dir = f"    tls {cert_f} {key_f}" if using_mkcert else "    tls internal"
+
+    # ── Correct HTTP site-address for the redirect blocks ───────────────────
+    # Caddy's implicit port for http:// is 80. When using a non-standard port
+    # the explicit port MUST appear in the site address or Caddy will listen on
+    # port 80 (which needs root on Linux/macOS) and the matcher won't fire for
+    # the actual traffic arriving on http_port.
+    if http_port == 80:
+        http_root = "http://pgops.test"
+        http_wild = "http://*.pgops.test"
+    else:
+        http_root = f"http://pgops.test:{http_port}"
+        http_wild = f"http://*.pgops.test:{http_port}"
+
+    # Redirect target: always go to HTTPS. Include port only when non-standard.
+    if https_port == 443:
+        https_root_target = "https://pgops.test{uri}"
+        https_wild_target = "https://{host}{uri}"
+    else:
+        https_root_target = f"https://pgops.test:{https_port}{{uri}}"
+        https_wild_target = f"https://{{host}}:{https_port}{{uri}}"
+
+    # ── Global block ────────────────────────────────────────────────────────
     lines = [
         "{",
         f"    admin 127.0.0.1:{admin_port}",
         f"    http_port {http_port}",
         f"    https_port {https_port}",
-        f"    storage file_system {{",
+        "    storage file_system {",
         f"        root {caddy_data}",
-        f"    }}",
-        # Disable Caddy's internal CA when using mkcert — keeps things clean
-        *(
-            ["    pki {", '        ca local { name "PGOps Local CA" }', "    }"]
-            if not (cert_f and key_f)
-            else []
-        ),
+        "    }",
+    ]
+
+    # Emit PKI block only for internal CA so the CA has a stable, human-readable
+    # name. Skip it entirely when using mkcert — Caddy won't touch its own CA.
+    if not using_mkcert:
+        lines += [
+            "    pki {",
+            '        ca local { name "PGOps Local CA" }',
+            "    }",
+        ]
+
+    lines += ["}", ""]
+
+    # ── HTTP → HTTPS redirects ───────────────────────────────────────────────
+    lines += [
+        f"{http_root} {{",
+        f"    redir {https_root_target} permanent",
+        "}",
+        "",
+        f"{http_wild} {{",
+        f"    redir {https_wild_target} permanent",
         "}",
         "",
     ]
 
-    # ── HTTP → HTTPS global redirect ────────────────────────────────────────
-    lines += [
-        f"http://pgops.test {{",
-        f"    redir https://pgops.test{{uri}} permanent",
-        "}",
-        "",
-        f"http://*.pgops.test {{",
-        f"    redir https://{{host}}{{uri}} permanent",
-        "}",
-        "",
-    ]
+    # ── Helper to emit a single site block ──────────────────────────────────
+    def site_block(subdomain: str, upstream_port: int) -> list[str]:
+        """Return lines for one HTTPS reverse-proxy site block."""
+        host = f"{subdomain}:{https_port}" if subdomain else f"pgops.test:{https_port}"
+        return [
+            f"{host} {{",
+            tls_dir,
+            f"    reverse_proxy 127.0.0.1:{upstream_port}",
+            "}",
+            "",
+        ]
 
     # ── pgops.test root (landing page) ──────────────────────────────────────
     lines += [
@@ -272,48 +313,24 @@ def generate_caddyfile(
     ]
 
     # ── minio.pgops.test → MinIO API ────────────────────────────────────────
-    lines += [
-        f"minio.pgops.test:{https_port} {{",
-        tls_dir,
-        f"    reverse_proxy 127.0.0.1:{minio_api_port}",
-        "}",
-        "",
-    ]
+    lines += site_block("minio.pgops.test", minio_api_port)
 
     # ── console.pgops.test → MinIO Console ──────────────────────────────────
-    lines += [
-        f"console.pgops.test:{https_port} {{",
-        tls_dir,
-        f"    reverse_proxy 127.0.0.1:{minio_console_port}",
-        "}",
-        "",
-    ]
+    lines += site_block("console.pgops.test", minio_console_port)
 
-    # ── pgadmin.pgops.test → pgAdmin (when running) ─────────────────────────
+    # ── pgadmin.pgops.test → pgAdmin (only when running) ────────────────────
     if pgadmin_enabled:
-        lines += [
-            f"pgadmin.pgops.test:{https_port} {{",
-            tls_dir,
-            f"    reverse_proxy 127.0.0.1:{pgadmin_port}",
-            "}",
-            "",
-        ]
+        lines += site_block("pgadmin.pgops.test", pgadmin_port)
 
     # ── App subdomains ───────────────────────────────────────────────────────
+    # Stopped apps intentionally get a 502 — the domain is still routed so the
+    # user knows the app is registered; they just need to start it.
     for app in apps:
-        domain = app.get("domain", "")
-        port   = app.get("internal_port", 8081)
+        domain = app.get("domain", "").strip()
+        port   = app.get("internal_port", 8082)
         if not domain:
             continue
-        # Include all apps in routing — stopped apps show a 502 (by design:
-        # user can see the domain is registered and knows to start the app)
-        lines += [
-            f"{domain}:{https_port} {{",
-            tls_dir,
-            f"    reverse_proxy 127.0.0.1:{port}",
-            "}",
-            "",
-        ]
+        lines += site_block(domain, port)
 
     caddyfile_path = get_caddy_dir() / "Caddyfile"
     caddyfile_path.write_text("\n".join(lines), encoding="utf-8")
@@ -321,16 +338,28 @@ def generate_caddyfile(
 
 
 def _build_caddy_env() -> dict:
-    """Build environment for Caddy process."""
+    """
+    Build the environment for the Caddy process.
+
+    Caddy stores TLS state (ACME accounts, internal CA, cached certs) under
+    XDG_DATA_HOME on Linux/macOS and APPDATA on Windows. We redirect all of
+    these to our own caddy/data directory so the app stays self-contained and
+    never writes to the user's home directory or requires elevated access.
+    """
     env = {**os.environ}
     caddy_data = str(get_caddy_data_dir())
-    env["XDG_DATA_HOME"]  = caddy_data
-    env["CADDY_DATA_DIR"] = caddy_data
+
+    env["XDG_DATA_HOME"]  = caddy_data   # Linux / macOS
+    env["CADDY_DATA_DIR"] = caddy_data   # explicit override (some builds)
+
     if platform.system() != "Windows":
+        # Caddy falls back to $HOME/.local/share when XDG_DATA_HOME is unset;
+        # setting HOME keeps it fully contained even on systems that ignore XDG.
         env["HOME"] = caddy_data
-    if platform.system() == "Windows":
+    else:
         env["APPDATA"]      = caddy_data
         env["LOCALAPPDATA"] = caddy_data
+
     return env
 
 
@@ -350,18 +379,19 @@ class CaddyManager:
         self._log(msg)
 
     # ── Port properties ───────────────────────────────────────────────────────
+    # Defaults use non-privileged ports (≥1024) so Caddy never needs root.
 
     @property
     def http_port(self) -> int:
-        return self.config.get("caddy_http_port", 80)
+        return self.config.get("caddy_http_port", 8080)
 
     @property
     def https_port(self) -> int:
-        return self.config.get("caddy_https_port", 443)
+        return self.config.get("caddy_https_port", 8443)
 
     @property
     def landing_port(self) -> int:
-        return self.config.get("landing_port", 8080)
+        return self.config.get("landing_port", 8081)
 
     @property
     def minio_api_port(self) -> int:
@@ -378,9 +408,7 @@ class CaddyManager:
     # ── mkcert integration ────────────────────────────────────────────────────
 
     def _get_tls_files(self) -> tuple[str, str]:
-        """
-        Return (cert_file, key_file) if mkcert cert exists, else ("", "").
-        """
+        """Return (cert_file, key_file) if mkcert cert exists, else ("", "")."""
         try:
             from core.mkcert_manager import get_cert_path, get_key_path, is_cert_generated
             if is_cert_generated():
@@ -393,6 +421,7 @@ class CaddyManager:
         """
         Make sure an mkcert cert exists. Generate one if not.
         Called automatically before starting Caddy.
+        On failure Caddy will fall back to `tls internal` — not a hard error.
         """
         try:
             from core.mkcert_manager import is_cert_generated, generate_cert, is_available
@@ -411,6 +440,13 @@ class CaddyManager:
         return is_caddy_available()
 
     def is_running(self) -> bool:
+        """
+        Check whether Caddy is actually responding, not just whether we
+        launched a process.  Order of preference:
+          1. Admin API socket (most reliable — Caddy is ready to serve)
+          2. psutil process scan (catches externally-started Caddy)
+          3. Port probe (last resort when psutil is not installed)
+        """
         if is_caddy_admin_running(self.ADMIN_PORT):
             return True
         if is_caddy_process_running():
@@ -427,7 +463,7 @@ class CaddyManager:
             self._log("[Caddy] Already running.")
             return True, "Caddy already running."
 
-        # Ensure mkcert cert is available
+        # Try to get an mkcert cert; fall back to internal CA gracefully.
         cert_ok, cert_msg = self.ensure_tls_cert()
         if cert_ok:
             self._log(f"[Caddy] {cert_msg}")
@@ -452,6 +488,9 @@ class CaddyManager:
         self._log(f"[Caddy] Caddyfile → {caddyfile}")
 
         env = _build_caddy_env()
+        # `caddy run` keeps Caddy in the foreground (we manage the process).
+        # stdout/stderr are discarded here; add a log file path via
+        # --log if you need persistent Caddy logs.
         cmd = [str(get_caddy_bin()), "run", "--config", caddyfile]
 
         try:
@@ -464,31 +503,58 @@ class CaddyManager:
         except Exception as exc:
             return False, f"Failed to start Caddy: {exc}"
 
-        # Wait up to 20 s for admin API
+        # Wait up to 20 s for the admin API to become available.
+        # The admin API comes up only after Caddy has successfully parsed the
+        # config and bound to its ports — so this is also a config-validity check.
         for _ in range(40):
             time.sleep(0.5)
+
+            # Check that the process didn't die immediately (bad config, port
+            # conflict, etc.) before we keep waiting pointlessly.
+            with self._lock:
+                proc = self._proc
+            if proc is not None and proc.poll() is not None:
+                return False, (
+                    f"Caddy exited immediately (code {proc.returncode}). "
+                    "Check that the configured ports are free and the Caddyfile is valid."
+                )
+
             if is_caddy_admin_running(self.ADMIN_PORT):
                 tls_mode = "mkcert" if cert_file else "internal CA"
+                app_count = len([a for a in apps if a.get("domain")])
                 self._log(
                     f"[Caddy] Running — "
                     f"HTTP:{self.http_port} HTTPS:{self.https_port} TLS:{tls_mode}\n"
                     f"[Caddy] pgops.test | minio.pgops.test | console.pgops.test"
                     + (" | pgadmin.pgops.test" if pgadmin_running else "")
-                    + (f" | + {len([a for a in apps if a.get('domain')])} app(s)" if apps else "")
+                    + (f" | +{app_count} app(s)" if app_count else "")
                 )
                 return True, (
                     f"Caddy started ({tls_mode}). "
                     f"Domains: pgops.test, *.pgops.test"
                 )
 
-        return False, "Caddy did not start in time (admin API not responding)."
+        # Timed out — kill the stray process so we don't leave it dangling.
+        self.stop()
+        return False, (
+            "Caddy did not start in time (admin API not responding). "
+            "Possible causes: port conflict, firewall blocking, or invalid Caddyfile."
+        )
 
     def reload(self, apps: list = None, pgadmin_running: bool = False) -> tuple[bool, str]:
-        """Regenerate Caddyfile and hot-reload via admin API."""
+        """
+        Regenerate the Caddyfile and hot-reload Caddy without dropping connections.
+
+        Strategy:
+          1. Regenerate Caddyfile from current app list.
+          2. Validate with `caddy adapt` (converts Caddyfile → JSON; catches errors
+             before we push a bad config to the running instance).
+          3. POST the JSON to the admin API (/load) for zero-downtime reload.
+          4. Fall back to `caddy reload` CLI if the admin API call fails.
+        """
         if not self.is_running():
             return False, "Caddy not running."
 
-        # Regenerate with latest app list
         if apps is not None:
             cert_file, key_file = self._get_tls_files()
             generate_caddyfile(
@@ -509,21 +575,26 @@ class CaddyManager:
         if not Path(caddyfile).exists():
             return False, "Caddyfile not found."
 
-        # Try admin API hot-reload
+        env = _build_caddy_env()
+
+        # ── Step 1: validate + convert to JSON ──────────────────────────────
+        r = subprocess.run(
+            [str(get_caddy_bin()), "adapt", "--config", caddyfile],
+            capture_output=True, text=True, env=env, **_popen_kwargs(),
+            encoding="utf-8",
+            errors="replace",
+        )
+        if r.returncode != 0:
+            return False, f"Caddyfile validation failed:\n{r.stderr.strip()}"
+
+        config_json = r.stdout.strip().encode("utf-8")
+
+        # ── Step 2: push to admin API ────────────────────────────────────────
         try:
             import urllib.request
-
-            env = _build_caddy_env()
-            r = subprocess.run(
-                [str(get_caddy_bin()), "adapt", "--config", caddyfile],
-                capture_output=True, text=True, env=env, **_popen_kwargs(),
-            )
-            if r.returncode != 0:
-                return False, f"caddy adapt failed: {r.stderr}"
-
             req = urllib.request.Request(
                 f"http://127.0.0.1:{self.ADMIN_PORT}/load",
-                data=r.stdout.strip().encode("utf-8"),
+                data=config_json,
                 headers={"Content-Type": "application/json"},
                 method="POST",
             )
@@ -531,26 +602,34 @@ class CaddyManager:
                 if resp.status == 200:
                     self._log("[Caddy] Config reloaded via admin API.")
                     return True, "Caddy reloaded."
-                return False, f"Admin API returned {resp.status}"
+                return False, f"Admin API returned HTTP {resp.status}."
         except Exception as exc:
-            self._log(f"[Caddy] Admin API reload failed, trying CLI: {exc}")
+            self._log(f"[Caddy] Admin API reload failed ({exc}), trying CLI fallback.")
 
-        # CLI fallback
-        env = _build_caddy_env()
+        # ── Step 3: CLI fallback (`caddy reload`) ───────────────────────────
         r = subprocess.run(
             [str(get_caddy_bin()), "reload", "--config", caddyfile],
             capture_output=True, text=True, env=env, **_popen_kwargs(),
+            encoding="utf-8",
+            errors="replace",
         )
         if r.returncode == 0:
+            self._log("[Caddy] Config reloaded via CLI.")
             return True, "Caddy reloaded via CLI."
         return False, (r.stdout + r.stderr).strip()
 
     def stop(self) -> tuple[bool, str]:
+        """
+        Stop Caddy. Tries (in order):
+          1. Terminate the process we own (self._proc).
+          2. Kill any remaining Caddy process found by psutil / taskkill.
+        Does NOT raise — always returns a result tuple.
+        """
         with self._lock:
             proc = self._proc
             self._proc = None
 
-        if proc:
+        if proc is not None:
             try:
                 proc.terminate()
                 proc.wait(timeout=5)
@@ -560,6 +639,7 @@ class CaddyManager:
                 except Exception:
                     pass
 
+        # Mop up any externally-started or orphaned Caddy instances.
         if is_caddy_process_running():
             if platform.system() == "Windows":
                 subprocess.run(
@@ -573,10 +653,14 @@ class CaddyManager:
         return True, "Caddy stopped."
 
     def update_apps(self, apps: list, pgadmin_running: bool = False) -> tuple[bool, str]:
-        """Called when an app is deployed/deleted/started/stopped."""
+        """
+        Called whenever an app is deployed, deleted, started, or stopped.
+        If Caddy is running, hot-reloads the config; otherwise just writes an
+        updated Caddyfile so the next start picks up the changes.
+        """
         if self.is_running():
             return self.reload(apps=apps, pgadmin_running=pgadmin_running)
-        # Just update the Caddyfile so it's ready for next start
+
         cert_file, key_file = self._get_tls_files()
         generate_caddyfile(
             apps,
@@ -613,14 +697,16 @@ class CaddyManager:
             "mkcert_cert_exists":  mk.get("cert_exists", False),
             "ca_path":             mk.get("ca_path", ""),
             "cert_info":           mk.get("cert_info", {}),
-            # Backward-compat keys (used by tab_ssl)
+            # Backward-compat key used by tab_ssl
             "ca_available": mk.get("ca_installed", False),
         }
 
     def console_url(self) -> str:
-        return f"https://pgops.test" if self.https_port == 443 else f"https://pgops.test:{self.https_port}"
+        if self.https_port == 443:
+            return "https://pgops.test"
+        return f"https://pgops.test:{self.https_port}"
 
-    # ── Legacy compat (used by tab_ssl for export) ────────────────────────────
+    # ── Legacy compat (used by tab_ssl for CA export) ─────────────────────────
 
     def get_ca_cert_path(self):
         try:

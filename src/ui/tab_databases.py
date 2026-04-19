@@ -1,19 +1,3 @@
-"""
-tab_databases.py  (v2 — stable edition)
-
-Fixes from v1:
-  - _SqlRunner no longer drops a live connection every time the selected DB
-    label is updated — it only reconnects when the actual database name changes
-  - Schema tree handles empty databases gracefully (no more crash on 0 tables)
-  - SQL runner catches psycopg2.InternalError / closed-connection errors and
-    reconnects automatically before retrying
-  - _DbRow layout is simplified to a plain QHBoxLayout — no nested
-    setObjectName selectors that caused stylesheet bleed
-  - populate() is safe to call multiple times rapidly (debounce guard)
-  - Table row count badges are loaded asynchronously so the schema tree
-    appears immediately without waiting for COUNT(*) queries
-"""
-
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QLineEdit, QDialog, QDialogButtonBox, QMessageBox,
@@ -903,6 +887,7 @@ class DatabasesTab(QWidget):
 
     def _build(self):
         root = QVBoxLayout(self)
+
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
@@ -914,9 +899,13 @@ class DatabasesTab(QWidget):
 
         body = QWidget()
         body.setStyleSheet("background:#1a1d23;")
+
         bv = QVBoxLayout(body)
         bv.setContentsMargins(28, 28, 28, 0)
         bv.setSpacing(0)
+
+        scroll.setWidget(body)
+        root.addWidget(scroll)
 
         # Page header
         page_hdr = QHBoxLayout()
@@ -993,11 +982,6 @@ class DatabasesTab(QWidget):
         rl.addWidget(self._sql_runner)
         bv.addWidget(runner_container)
         bv.addSpacing(28)
-
-        scroll.setWidget(body)
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.addWidget(scroll)
 
     def _build_table_header(self):
         hdr = QWidget()

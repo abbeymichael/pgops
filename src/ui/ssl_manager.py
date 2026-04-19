@@ -238,8 +238,8 @@ def enable_ssl(base_dir: Path, data_dir: Path) -> tuple[bool, str]:
     if not data_dir.exists():
         return False, f"PostgreSQL data directory not found: {data_dir}"
 
-    pg_crt = data_dir / "server.crt"
-    pg_key = data_dir / "server.key"
+    pg_crt = data_dir / "certs" / "pgops.crt"
+    pg_key = data_dir / "certs" / "pgops.key"
 
     try:
         shutil.copy2(cert_path(base_dir), pg_crt)

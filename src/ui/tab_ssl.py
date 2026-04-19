@@ -435,9 +435,8 @@ class SslTab(QWidget):
 
     def _update_mkcert_status(self):
         try:
-            from core.mkcert_manager import (
-                is_available, is_ca_installed, cert_path, key_path, get_cert_info,
-            )
+            from core.mkcert_manager import is_available, is_ca_installed
+            from core.ssl_manager import cert_path, key_path, get_cert_info
             binary_ok = is_available()
             ca_ok     = is_ca_installed() if binary_ok else False
             cert_ok   = cert_path().exists() and key_path().exists()
@@ -490,8 +489,7 @@ class SslTab(QWidget):
 
     def _update_pg_ssl_status(self):
         try:
-            from core.ssl_manager import get_ssl_status
-            from core.mkcert_manager import cert_path, key_path
+            from core.ssl_manager import get_ssl_status, cert_path, key_path
             status = get_ssl_status(DATA_DIR)
 
             if status["enabled"]:
@@ -524,7 +522,7 @@ class SslTab(QWidget):
 
         running  = self._caddy.is_running()
         try:
-            from core.mkcert_manager import cert_path, key_path
+            from core.ssl_manager import cert_path, key_path
             cert_ok = cert_path().exists() and key_path().exists()
         except Exception:
             cert_ok = False
@@ -535,7 +533,7 @@ class SslTab(QWidget):
                 f"color:{C_GREEN};font-size:12px;font-weight:700;background:transparent;"
             )
             if self._caddy:
-                url = self._caddy.landing_url()
+                url = self._caddy.console_url()
                 self._caddy_url_lbl.setText(f"https://pgops.test  →  {url}")
         elif running:
             self._caddy_ssl_badge.setText("● RUNNING (no mkcert cert — using Caddy internal CA)")
@@ -558,7 +556,15 @@ class SslTab(QWidget):
 
         def fn(prog_cb):
             from core.mkcert_manager import setup_mkcert
-            return setup_mkcert(progress_callback=prog_cb, log_fn=self._on_log)
+            ok, msg = setup_mkcert(progress_callback=prog_cb, log_fn=self._on_log)
+            if ok:
+                # Populate certs/pgops.crt and certs/pgops.key
+                from core.ssl_manager import generate_certificate
+                ok2, msg2 = generate_certificate(log_fn=self._on_log)
+                if not ok2:
+                    return False, f"CA installed but cert generation failed: {msg2}"
+                return True, msg + "\n" + msg2
+            return ok, msg
 
         def done(ok, msg):
             self._mkcert_prog.setVisible(False)
@@ -587,8 +593,8 @@ class SslTab(QWidget):
         self.btn_mkcert_regen.setEnabled(False)
 
         def fn(_prog):
-            from core.mkcert_manager import generate_cert
-            return generate_cert(log_fn=self._on_log)
+            from core.ssl_manager import generate_certificate
+            return generate_certificate(log_fn=self._on_log)
 
         def done(ok, msg):
             self.btn_mkcert_regen.setEnabled(True)
@@ -612,7 +618,7 @@ class SslTab(QWidget):
             "Certificate Files (*.crt *.pem);;All Files (*)"
         )
         if dest:
-            from core.mkcert_manager import export_ca_cert
+            from core.ssl_manager import export_ca_cert
             ok, msg = export_ca_cert(dest, log_fn=self._on_log)
             self._on_log(f"[mkcert] {msg}")
             if ok:
@@ -627,16 +633,14 @@ class SslTab(QWidget):
     # ── PostgreSQL SSL action handlers ─────────────────────────────────────────
 
     def _enable_ssl(self):
-        try:
-            from core.mkcert_manager import cert_path, key_path
-            if not cert_path().exists() or not key_path().exists():
-                QMessageBox.warning(
-                    self, "No Certificate",
-                    "mkcert certificate not found.\nRun 'Full Setup' first."
-                )
-                return
-        except Exception:
-            pass
+        from core.ssl_manager import cert_path, key_path, enable_ssl_with_paths
+        if not cert_path().exists() or not key_path().exists():
+            QMessageBox.warning(
+                self, "No Certificate",
+                "mkcert certificate not found in certs/pgops.crt.\n"
+                "Run 'Full Setup' first."
+            )
+            return
 
         if not self._manager.is_initialized():
             QMessageBox.warning(
@@ -645,15 +649,7 @@ class SslTab(QWidget):
             )
             return
 
-        try:
-            from core.mkcert_manager import cert_path as crt_fn, key_path as key_fn
-            from core.ssl_manager import enable_ssl_with_paths
-            ok, msg = enable_ssl_with_paths(DATA_DIR, str(crt_fn()), str(key_fn()))
-        except ImportError:
-            # Fallback to old API if ssl_manager doesn't have the new function
-            from core.ssl_manager import enable_ssl
-            ok, msg = enable_ssl(BASE_DIR, DATA_DIR)
-
+        ok, msg = enable_ssl_with_paths(DATA_DIR)
         self._on_log(msg)
         self._update_pg_ssl_status()
         if ok:

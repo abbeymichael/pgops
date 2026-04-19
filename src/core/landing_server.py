@@ -10,7 +10,7 @@ from typing import Callable, Optional
 
 
 LANDING_HOST = "127.0.0.1"
-LANDING_PORT = 8080   # Caddy proxies pgops.test → here; set via config["landing_port"]
+LANDING_PORT = 8080  # Caddy proxies pgops.test → here; set via config["landing_port"]
 
 _STYLE = """
 <style>
@@ -122,16 +122,16 @@ class _Handler(BaseHTTPRequestHandler):
             self.wfile.write(b"ok")
             return
 
-        apps    = self.get_apps()
+        apps = self.get_apps()
         host_ip = self.get_host_ip()
 
         # Apps section
         if apps:
             cards = ""
             for app in apps:
-                status  = app.get("status", "stopped")
-                badge   = f'<span class="badge {status}">{status.upper()}</span>'
-                domain  = app.get("domain", "")
+                status = app.get("status", "stopped")
+                badge = f'<span class="badge {status}">{status.upper()}</span>'
+                domain = app.get("domain", "")
                 cards += f"""
                 <div class="app-card">
                   <div class="app-name">{app.get("display_name", app["id"])}</div>
@@ -185,11 +185,17 @@ class LandingServer:
     Caddy proxies pgops.test → here.
     """
 
-    def __init__(self, get_apps: Callable, get_host_ip: Callable, log_fn=None, port: int = LANDING_PORT):
-        self._get_apps    = get_apps
+    def __init__(
+        self,
+        get_apps: Callable,
+        get_host_ip: Callable,
+        log_fn=None,
+        port: int = LANDING_PORT,
+    ):
+        self._get_apps = get_apps
         self._get_host_ip = get_host_ip
-        self._log         = log_fn or print
-        self._port        = port
+        self._log = log_fn or print
+        self._port = port
         self._server: Optional[HTTPServer] = None
         self._thread: Optional[threading.Thread] = None
 
@@ -198,8 +204,8 @@ class LandingServer:
             return True, "Landing server already running."
 
         class _H(_Handler):
-            get_apps    = self._get_apps
-            get_host_ip = self._get_host_ip
+            get_apps = staticmethod(self._get_apps)
+            get_host_ip = staticmethod(self._get_host_ip)
 
         port = self._port
         try:
