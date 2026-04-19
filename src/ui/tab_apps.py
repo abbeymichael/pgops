@@ -1,18 +1,3 @@
-"""
-tab_apps.py
-Apps Tab — deploy and manage Laravel web applications.
-
-CHANGES:
-- PHP Extensions popup per app: list all extensions (compiled / loadable /
-  missing), toggle each on/off, save persists to app registry + rebuilds ini,
-  restart is offered automatically after saving.
-- _start() and _restart() fixed: they now pass the app's saved php_extensions
-  and correctly call start_app / restart_app so the process actually launches.
-- Rollback on deploy failure now triggers delete_app() which cleans up files,
-  DB, DB user, bucket, and the per-app php.ini directory.
-- _Worker.run() passes progress_cb correctly so progress signals fire.
-"""
-
 import os
 import platform
 import subprocess
@@ -314,6 +299,12 @@ class DeployWizard(QDialog):
 
         self.setWindowTitle("Deploy New App")
         self.setFixedWidth(520)
+        # Prevent the wizard from growing taller than the available screen area,
+        # which causes Qt geometry warnings on smaller / high-DPI displays.
+        screen = QApplication.primaryScreen()
+        if screen:
+            available_h = screen.availableGeometry().height()
+            self.setMaximumHeight(min(available_h - 80, 900))
         self.setStyleSheet(f"background:{C_SURFACE};color:{C_TEXT};")
 
         self._stack = QStackedWidget()
@@ -485,7 +476,16 @@ class DeployWizard(QDialog):
         self._steps_layout = QVBoxLayout(self._steps_container)
         self._steps_layout.setContentsMargins(0, 0, 0, 0)
         self._steps_layout.setSpacing(6)
-        v.addWidget(self._steps_container)
+        self._steps_layout.addStretch()
+
+        steps_scroll = QScrollArea()
+        steps_scroll.setWidgetResizable(True)
+        steps_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        steps_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        steps_scroll.setStyleSheet("background:transparent;border:none;")
+        steps_scroll.setMaximumHeight(300)
+        steps_scroll.setWidget(self._steps_container)
+        v.addWidget(steps_scroll)
 
         self._prog_bar = QProgressBar()
         self._prog_bar.setRange(0, 0)
@@ -539,7 +539,9 @@ class DeployWizard(QDialog):
         container = QWidget()
         container.setStyleSheet("background:transparent;")
         container.setLayout(row)
-        self._steps_layout.addWidget(container)
+        # Insert before the trailing stretch so rows stack top-to-bottom
+        insert_pos = max(0, self._steps_layout.count() - 1)
+        self._steps_layout.insertWidget(insert_pos, container)
         return icon_lbl
 
     def _run_deploy(self):
