@@ -38,7 +38,7 @@ from core.minio_manager import MinIOManager
 from core.pgadmin_manager import PgAdminManager
 
 # Phase 2
-from core.mdns_server import MDNSServer          # replaces DNSServerThread
+from core.mdns_server import MDNSServer  # replaces DNSServerThread
 from core.caddy_manager import CaddyManager, setup_caddy_binary
 from core.frankenphp_manager import (
     AppProcessManager,
@@ -183,7 +183,7 @@ class MainWindow(QMainWindow):
 
         # Staggered Phase 2 startup
         QTimer.singleShot(500, self._auto_start_mdns)
-        QTimer.singleShot(600, self._start_mdns_server)   # mDNS .local broadcast
+        QTimer.singleShot(600, self._start_mdns_server)  # mDNS .local broadcast
         QTimer.singleShot(700, self._start_landing_server)
         QTimer.singleShot(800, self._start_api_server)
         QTimer.singleShot(2000, self._start_caddy_and_apps)
@@ -191,14 +191,22 @@ class MainWindow(QMainWindow):
     # ── Phase 2 startup helpers ───────────────────────────────────────────────
 
     def _start_mdns_server(self):
-        """Start the MDNSServer that advertises pgops.local on the LAN."""
+        """Start the MDNSServer and register all PGOps service subdomains."""
         ok, msg = self.mdns_server.start()
         self._log(msg)
+
+        # Register the fixed infrastructure subdomains so LAN devices can
+        # resolve minio.pgops.local, console.pgops.local, pgadmin.pgops.local
+        # in addition to app-specific subdomains.
+        for hostname in ("minio.pgops", "console.pgops", "pgadmin.pgops"):
+            self.mdns_server.register_app("", domain=f"{hostname}.local")
+
         # Register any already-deployed apps
         for app in load_apps():
             domain = app.get("domain", "")
             if domain:
                 self.mdns_server.register_app(app["id"], domain)
+
         if hasattr(self, "_dns_tab"):
             self._dns_tab.refresh()
 
@@ -218,7 +226,9 @@ class MainWindow(QMainWindow):
             for app_id, ok, msg in results:
                 self._log(f"[App:{app_id}] {msg}")
         if self.caddy.is_available():
-            ok, msg = self.caddy.start(apps)
+            # pgadmin_running flag kept for compat but no longer controls the
+            # pgadmin block — it is always written in generate_caddyfile()
+            ok, msg = self.caddy.start(apps, pgadmin_running=self.pgadmin.is_running())
             self._log(msg)
         else:
             self._log("[Caddy] Binary not found — click Setup Caddy in the Server tab.")
@@ -401,19 +411,19 @@ class MainWindow(QMainWindow):
     def _on_nav(self, key):
         self._stack.setCurrentIndex(self._page_idx.get(key, 0))
         TITLES = {
-            "server":    ("THE COMMAND CONSOLE", "PGOps Orchestrator"),
-            "activity":  ("THE COMMAND CONSOLE", "Activity Monitor"),
+            "server": ("THE COMMAND CONSOLE", "PGOps Orchestrator"),
+            "activity": ("THE COMMAND CONSOLE", "Activity Monitor"),
             "databases": ("THE COMMAND CONSOLE", "Databases"),
-            "apps":      ("THE COMMAND CONSOLE", "Web Applications"),
-            "files":     ("THE COMMAND CONSOLE", "Storage"),
-            "backup":    ("THE COMMAND CONSOLE", "Backup & Restore"),
-            "schedule":  ("THE COMMAND CONSOLE", "Schedule"),
-            "ssl":       ("THE COMMAND CONSOLE", "SSL / TLS"),
-            "service":   ("THE COMMAND CONSOLE", "Service"),
-            "settings":  ("THE COMMAND CONSOLE", "Settings"),
-            "network":   ("THE COMMAND CONSOLE", "Network"),
-            "dns":       ("THE COMMAND CONSOLE", "Network Discovery"),
-            "log":       ("THE COMMAND CONSOLE", "Log"),
+            "apps": ("THE COMMAND CONSOLE", "Web Applications"),
+            "files": ("THE COMMAND CONSOLE", "Storage"),
+            "backup": ("THE COMMAND CONSOLE", "Backup & Restore"),
+            "schedule": ("THE COMMAND CONSOLE", "Schedule"),
+            "ssl": ("THE COMMAND CONSOLE", "SSL / TLS"),
+            "service": ("THE COMMAND CONSOLE", "Service"),
+            "settings": ("THE COMMAND CONSOLE", "Settings"),
+            "network": ("THE COMMAND CONSOLE", "Network"),
+            "dns": ("THE COMMAND CONSOLE", "Network Discovery"),
+            "log": ("THE COMMAND CONSOLE", "Log"),
         }
         sec, pg = TITLES.get(key, ("THE COMMAND CONSOLE", ""))
         self._hbar.set_title(sec, pg)
@@ -467,7 +477,7 @@ class MainWindow(QMainWindow):
     def _quit(self):
         self.scheduler.stop()
         self.mdns.stop()
-        self.mdns_server.stop()   # stop mDNS .local broadcast
+        self.mdns_server.stop()  # stop mDNS .local broadcast
         self.app_procs.stop_all()
         self.caddy.stop()
         self.api_server.stop()
@@ -501,17 +511,29 @@ class MainWindow(QMainWindow):
             self._backup_tab.refresh_backup_list()
             self._ssl_tab.refresh_status()
             if not self.minio.is_running() and self.minio.is_binaries_available():
+
                 def _sm(_p):
                     return self.minio.start()
+
                 self._run(_sm, lambda ok, msg: self._log(f"[MinIO] {msg}"))
             if not self.pgadmin.is_running() and self.pgadmin.is_available():
+
                 def _spa(_p):
-                    return self.pgadmin.start()
+                    # Pass the Caddy HTTPS port so pgAdmin's config_local.py
+                    # gets the correct public URL for CSRF validation
+                    return self.pgadmin.start(caddy_https_port=self.caddy.https_port)
+
                 self._run(
                     _spa,
                     lambda ok, msg: (
                         self._log(f"[pgAdmin] {msg}"),
                         self._update_pgadmin_status(),
+                        # Reload Caddy so pgadmin subdomain is live
+                        (
+                            self.caddy.update_apps(load_apps())
+                            if self.caddy.is_running()
+                            else None
+                        ),
                     ),
                 )
             if not self.caddy.is_running():
@@ -577,17 +599,18 @@ class MainWindow(QMainWindow):
             )
             return
         self._srv_tab.btn_caddy_start.setEnabled(False)
-
+ 
         def fn(_p):
             apps = load_apps()
-            return self.caddy.start(apps)
-
+            return self.caddy.start(apps, pgadmin_running=self.pgadmin.is_running())
+ 
         def done(ok, msg):
             self._srv_tab.btn_caddy_start.setEnabled(True)
             self._log(f"[Caddy] {msg}")
             self._poll()
-
+ 
         self._run(fn, done)
+ 
 
     def _stop_caddy(self):
         self._srv_tab.btn_caddy_stop.setEnabled(False)
@@ -623,7 +646,8 @@ class MainWindow(QMainWindow):
     def _start_all_apps(self):
         if not is_frankenphp_available():
             QMessageBox.information(
-                self, "Setup Required",
+                self,
+                "Setup Required",
                 "Click Setup FrankenPHP first to download the binary.",
             )
             return
@@ -697,8 +721,12 @@ class MainWindow(QMainWindow):
 
         def fn(_p):
             return dbm.create_database(
-                dbname, owner, password,
-                self.config["username"], self.config["password"], self.config["port"],
+                dbname,
+                owner,
+                password,
+                self.config["username"],
+                self.config["password"],
+                self.config["port"],
             )
 
         def done(ok, msg):
@@ -713,7 +741,8 @@ class MainWindow(QMainWindow):
     def _drop_database(self, dbname):
         if (
             QMessageBox.question(
-                self, "Drop Database",
+                self,
+                "Drop Database",
                 f"Permanently delete '{dbname}'?\n\nThis cannot be undone.",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
@@ -724,7 +753,9 @@ class MainWindow(QMainWindow):
         def fn(_p):
             return dbm.drop_database(
                 dbname,
-                self.config["username"], self.config["password"], self.config["port"],
+                self.config["username"],
+                self.config["password"],
+                self.config["port"],
             )
 
         self._run(fn, lambda ok, msg: (self._log(msg), self._load_databases_async()))
@@ -742,8 +773,11 @@ class MainWindow(QMainWindow):
 
         def fn(_p):
             return dbm.change_role_password(
-                owner, new_pw,
-                self.config["username"], self.config["password"], self.config["port"],
+                owner,
+                new_pw,
+                self.config["username"],
+                self.config["password"],
+                self.config["port"],
             )
 
         self._run(fn, lambda ok, msg: self._log(msg))
@@ -760,7 +794,9 @@ class MainWindow(QMainWindow):
     def _scheduled_backup_fn(self, dbname):
         return dbm.backup_database(
             dbname,
-            self.config["username"], self.config["password"], self.config["port"],
+            self.config["username"],
+            self.config["password"],
+            self.config["port"],
         )
 
     # ── Settings ──────────────────────────────────────────────────────────────
@@ -769,9 +805,9 @@ class MainWindow(QMainWindow):
         self.config.update(new_cfg)
         save_config(self.config)
         self.manager.config = self.config
-        self.minio.config   = self.config
+        self.minio.config = self.config
         self.pgadmin.pg_config = self.config
-        self.caddy.config   = self.config
+        self.caddy.config = self.config
         self.api_server._cfg = self.config
         self.activity.update_config(self.config)
         self._db_tab.update_config(self.config)
@@ -782,7 +818,9 @@ class MainWindow(QMainWindow):
     def _change_app_password(self):
         dlg = ChangePwDialog(self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
-            QMessageBox.information(self, "Password Changed", "Master password updated.")
+            QMessageBox.information(
+                self, "Password Changed", "Master password updated."
+            )
             self._log("App password changed.")
 
     # ── pgAdmin ───────────────────────────────────────────────────────────────
@@ -790,22 +828,30 @@ class MainWindow(QMainWindow):
     def _start_pgadmin(self):
         if not self.pgadmin.is_available():
             QMessageBox.warning(
-                self, "Not Available",
+                self,
+                "Not Available",
                 "pgAdmin 4 not found. Run Setup PostgreSQL first.",
             )
             return
         self._srv_tab.btn_pga_start.setEnabled(False)
 
+        caddy_port = self.caddy.https_port
+
         def fn(_p):
-            return self.pgadmin.start()
+            return self.pgadmin.start(caddy_https_port=caddy_port)
 
         def done(ok, msg):
             self._srv_tab.btn_pga_start.setEnabled(True)
             self._log(f"[pgAdmin] {msg}")
             self._update_pgadmin_status()
             if ok:
+                # Reload Caddy so the pgadmin.pgops.local block is active
+                if self.caddy.is_running():
+                    self.caddy.update_apps(load_apps())
+                # Open the browser at the HTTPS subdomain, not the raw port
                 import webbrowser
-                webbrowser.open(self.pgadmin.url())
+
+                webbrowser.open(self.pgadmin.public_url(caddy_port))
 
         self._run(fn, done)
 
@@ -826,13 +872,18 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "pgAdmin Not Running", "Start pgAdmin first.")
             return
         import webbrowser
-        webbrowser.open(self.pgadmin.url())
+
+        # Always open through Caddy's HTTPS subdomain, never the raw port
+        webbrowser.open(self.pgadmin.public_url(self.caddy.https_port))
 
     def _reset_pgadmin(self):
         reply = QMessageBox.question(
-            self, "Reset pgAdmin",
+            self,
+            "Reset pgAdmin",
             "Stop pgAdmin, delete its database, and restart fresh?\n\n"
-            "Log in after reset with:\n  Email: admin@pgops.com\n  Password: pgopsadmin",
+            "Log in after reset with:\n"
+            f"  Email:    {self.pgadmin.default_credentials()['email']}\n"
+            f"  Password: {self.pgadmin.default_credentials()['password']}",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
@@ -841,8 +892,10 @@ class MainWindow(QMainWindow):
         self._srv_tab.btn_pga_reset.setEnabled(False)
         self._srv_tab.btn_pga_start.setEnabled(False)
 
+        caddy_port = self.caddy.https_port
+
         def fn(_p):
-            return self.pgadmin.reset_and_restart()
+            return self.pgadmin.reset_and_restart(caddy_https_port=caddy_port)
 
         def done(ok, msg):
             self._srv_tab.btn_pga_reset.setEnabled(True)
@@ -850,8 +903,11 @@ class MainWindow(QMainWindow):
             self._log(f"[pgAdmin] {msg}")
             self._update_pgadmin_status()
             if ok:
+                if self.caddy.is_running():
+                    self.caddy.update_apps(load_apps())
                 import webbrowser
-                webbrowser.open(self.pgadmin.url())
+
+                webbrowser.open(self.pgadmin.public_url(caddy_port))
 
         self._run(fn, done)
 
@@ -874,7 +930,8 @@ class MainWindow(QMainWindow):
 
     def _stop_mdns(self):
         reply = QMessageBox.question(
-            self, "Stop Broadcasting",
+            self,
+            "Stop Broadcasting",
             "pgops.local is the hostname all apps use.\n"
             "Stopping it will make pgops.local unreachable.\n\nContinue?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,

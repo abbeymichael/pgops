@@ -42,7 +42,13 @@ def get_hosts_file() -> Path:
 
 def get_hosts_entries(host_ip: str, app_domains: list = None) -> str:
     """Build the hosts file block for pgops.local and all app subdomains."""
-    base_domains = ["pgops.local", "www.pgops.local"]
+    base_domains = [
+        "pgops.local",
+        "www.pgops.local",
+        "pgadmin.pgops.local",
+        "minio.pgops.local",
+        "console.pgops.local",
+    ]
     extra = app_domains or []
     all_domains = base_domains + [d for d in extra if d not in base_domains]
 

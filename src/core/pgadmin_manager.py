@@ -88,19 +88,13 @@ def _reset_credentials(python: Path, log_fn) -> bool:
     """
     Reset pgAdmin credentials using a self-contained script.
     Tries Flask-Security first, then falls back to bcrypt directly.
-    The script is written to a temp file and run as a subprocess so that
-    pgAdmin's own Python environment is used — not the PGOps Python.
     """
     db_path  = get_data_dir() / "pgadmin4.db"
     web_dir  = get_pgadmin_dir() / "web"
 
     if not db_path.exists():
-        log_fn("[pgAdmin] DB not found yet — skipping credential reset.")
+        log_fn("[pgAdmin] DB not found yet - skipping credential reset.")
         return False
-
-    # Build the reset script. Use raw string paths to avoid backslash issues.
-    web_dir_str = str(web_dir).replace("\\", "\\\\")
-    db_path_str = str(db_path).replace("\\", "\\\\")
 
     script = f"""
 import sys, os, sqlite3
@@ -182,14 +176,14 @@ except Exception as e2:
             capture_output=True,
             text=True,
             timeout=45,
-            cwd=str(web_dir),       # run from pgAdmin's web dir
+            cwd=str(web_dir),
             **_popen_kwargs(),
         )
         out = (r.stdout + r.stderr).strip()
         log_fn(f"[pgAdmin] Reset output: {out[:400]}")
 
         if "OK_" in r.stdout:
-            log_fn(f"[pgAdmin] Credentials set → {DEFAULT_EMAIL} / {DEFAULT_PASSWORD}")
+            log_fn(f"[pgAdmin] Credentials set -> {DEFAULT_EMAIL} / {DEFAULT_PASSWORD}")
             return True
 
         log_fn(f"[pgAdmin] Reset failed (rc={r.returncode}). Manual login may be required.")
@@ -209,16 +203,13 @@ except Exception as e2:
 
 
 def _nuke_pgadmin_db(log_fn) -> bool:
-    """
-    Delete the pgAdmin SQLite database so it gets recreated fresh on next start.
-    This forces pgAdmin to re-run its setup with the env vars we pass.
-    """
+    """Delete the pgAdmin SQLite database so it gets recreated fresh on next start."""
     db_path = get_data_dir() / "pgadmin4.db"
     sessions_dir = get_data_dir() / "sessions"
     try:
         if db_path.exists():
             db_path.unlink()
-            log_fn("[pgAdmin] Removed stale pgadmin4.db — will be recreated fresh.")
+            log_fn("[pgAdmin] Removed stale pgadmin4.db - will be recreated fresh.")
         if sessions_dir.exists():
             import shutil
             shutil.rmtree(sessions_dir, ignore_errors=True)
@@ -256,23 +247,38 @@ class PgAdminManager:
     def _resolve_python(self) -> Path | None:
         p = get_pgadmin_python()
         if p.exists():
-            self.log(f"[pgAdmin] Python → {p}")
+            self.log(f"[pgAdmin] Python -> {p}")
             return p
         self.log("[pgAdmin] Scanning pgAdmin dir for Python…")
         p2 = find_pgadmin_python()
         if p2:
-            self.log(f"[pgAdmin] Python (scan) → {p2}")
+            self.log(f"[pgAdmin] Python (scan) -> {p2}")
             return p2
         return None
 
-    def _write_config(self):
+    def _write_config(self, caddy_https_port: int = 8443):
+        """
+        Write config_local.py so pgAdmin:
+          - Runs on plain HTTP internally (Caddy handles TLS)
+          - Accepts the X-Forwarded-Proto / X-Real-IP headers from Caddy
+          - Knows its public URL is https://pgadmin.pgops.local (no port suffix
+            when using standard 443, or with port suffix otherwise)
+          - Has CSRF and cookie settings compatible with the reverse proxy
+        """
         data_dir = get_data_dir()
         (data_dir / "sessions").mkdir(parents=True, exist_ok=True)
         (data_dir / "storage").mkdir(parents=True, exist_ok=True)
 
+        # Public-facing URL that pgAdmin uses for CSRF validation and cookie domain
+        if caddy_https_port == 443:
+            public_url = "https://pgadmin.pgops.local"
+        else:
+            public_url = f"https://pgadmin.pgops.local:{caddy_https_port}"
+
         config_file = get_pgadmin_dir() / "web" / "config_local.py"
         config_file.write_text(f"""
-# PGOps-generated pgAdmin configuration — do not edit manually
+# PGOps-generated pgAdmin configuration - do not edit manually
+# pgAdmin runs on plain HTTP; Caddy provides HTTPS at pgadmin.pgops.local
 import os
 
 SERVER_MODE = True
@@ -283,24 +289,53 @@ SQLITE_PATH     = os.path.join(DATA_DIR, "pgadmin4.db")
 SESSION_DB_PATH = os.path.join(DATA_DIR, "sessions")
 STORAGE_DIR     = os.path.join(DATA_DIR, "storage")
 
-DEFAULT_SERVER      = "0.0.0.0"
+# pgAdmin binds on plain HTTP - Caddy does TLS termination
+DEFAULT_SERVER      = "127.0.0.1"
 DEFAULT_SERVER_PORT = {self.port}
 
-SECRET_KEY               = "pgops-pgadmin-secret-key"
-SECURITY_PASSWORD_SALT   = "pgops-salt"
+# Application root - pgAdmin is served at / with no subpath
+APPLICATION_ROOT = "/"
+
+# Proxy header support - required when behind Caddy (or any reverse proxy).
+# Tells pgAdmin to trust X-Forwarded-Proto and X-Real-IP from one upstream proxy.
+PROXY_X_HOST_COUNT      = 1
+PROXY_X_PREFIX_COUNT    = 0
+PROXY_X_FOR_COUNT       = 1
+PROXY_X_PROTO_COUNT     = 1
+
+# Secret keys
+SECRET_KEY               = "pgops-pgadmin-secret-key-change-in-prod"
+SECURITY_PASSWORD_SALT   = "pgops-salt-change-in-prod"
+
+# CSRF - disable strict SSL check because pgAdmin sees plain HTTP from Caddy.
+# WTF_CSRF_ENABLED stays True for security; SSL_STRICT must be False behind a proxy.
 WTF_CSRF_ENABLED         = True
+WTF_CSRF_SSL_STRICT      = False
+WTF_CSRF_TIME_LIMIT      = None
+
+# Session cookie - Secure=False here because the pgAdmin<->Caddy leg is plain HTTP.
+# Caddy itself serves the browser over HTTPS so the end-to-end connection is secure.
+SESSION_COOKIE_SECURE    = False
+SESSION_COOKIE_HTTPONLY  = True
+SESSION_COOKIE_SAMESITE  = "Lax"
+SESSION_COOKIE_DOMAIN    = None   # let Flask derive it from the request Host header
+
+# No master password popup on every login
 MASTER_PASSWORD_REQUIRED = False
 
+# Disable email server (not used)
 MAIL_SERVER = ""
 
+# Logging - errors only so the log stays clean
 CONSOLE_LOG_LEVEL = 40
 FILE_LOG_LEVEL    = 40
-""")
-        self.log(f"[pgAdmin] Config written → {config_file}")
+""", encoding="utf-8")
+        self.log(f"[pgAdmin] config_local.py written -> {config_file}")
+        self.log(f"[pgAdmin] Public URL: {public_url}")
 
     # ── Start / Stop ──────────────────────────────────────────────────────────
 
-    def start(self, fresh: bool = False) -> tuple[bool, str]:
+    def start(self, fresh: bool = False, caddy_https_port: int = 8443) -> tuple[bool, str]:
         if self.is_running():
             return True, f"pgAdmin already running at {self.url()}"
 
@@ -323,12 +358,11 @@ FILE_LOG_LEVEL    = 40
         if not web_py.exists():
             return False, f"pgAdmin4.py not found at {web_py}"
 
-        # If asked for a fresh start, nuke the DB so env-var credentials apply
         if fresh:
             _nuke_pgadmin_db(self.log)
             self._creds_reset = False
 
-        self._write_config()
+        self._write_config(caddy_https_port=caddy_https_port)
 
         env = {
             **os.environ,
@@ -357,7 +391,6 @@ FILE_LOG_LEVEL    = 40
         except Exception as e:
             return False, f"Failed to launch pgAdmin: {e}"
 
-        # Wait up to 90s for pgAdmin to bind its port
         self.log("[pgAdmin] Waiting for pgAdmin to become ready (up to 90s)…")
         for i in range(180):
             time.sleep(0.5)
@@ -374,7 +407,6 @@ FILE_LOG_LEVEL    = 40
             if self.is_running():
                 self.log(f"[pgAdmin] Ready at {self.url()}")
 
-                # Give the DB another second to finish initialising before we touch it
                 time.sleep(1.5)
 
                 if not self._creds_reset:
@@ -383,7 +415,6 @@ FILE_LOG_LEVEL    = 40
                     if ok:
                         self._creds_reset = True
                     else:
-                        # Last resort: nuke DB and ask user to restart
                         self.log(
                             "[pgAdmin] Credential reset failed. "
                             "Use 'Reset & Restart pgAdmin' to force fresh credentials."
@@ -394,7 +425,6 @@ FILE_LOG_LEVEL    = 40
             if (i + 1) % 30 == 0:
                 self.log(f"[pgAdmin] Still waiting… ({(i+1)*0.5:.0f}s)")
 
-        # Timed out
         try:
             if self._proc and self._proc.poll() is None:
                 self._proc.terminate()
@@ -406,15 +436,11 @@ FILE_LOG_LEVEL    = 40
 
         return False, "pgAdmin did not start in 90s. Check Log tab."
 
-    def reset_and_restart(self) -> tuple[bool, str]:
-        """
-        Stop pgAdmin, nuke its database, and restart fresh.
-        After this the env-var credentials (DEFAULT_EMAIL / DEFAULT_PASSWORD) apply
-        without needing the credential-reset script to succeed.
-        """
+    def reset_and_restart(self, caddy_https_port: int = 8443) -> tuple[bool, str]:
+        """Stop pgAdmin, nuke its database, and restart fresh."""
         self.stop()
         time.sleep(1)
-        return self.start(fresh=True)
+        return self.start(fresh=True, caddy_https_port=caddy_https_port)
 
     def stop(self) -> tuple[bool, str]:
         if not self.is_running():
@@ -439,7 +465,14 @@ FILE_LOG_LEVEL    = 40
         return True, "pgAdmin stopped."
 
     def url(self) -> str:
-        return f"http://pgops.local:{self.port}"
+        """Internal URL (used during startup/health checks)."""
+        return f"http://127.0.0.1:{self.port}"
+
+    def public_url(self, caddy_https_port: int = 8443) -> str:
+        """The URL users should use in their browser (via Caddy HTTPS)."""
+        if caddy_https_port == 443:
+            return "https://pgadmin.pgops.local"
+        return f"https://pgadmin.pgops.local:{caddy_https_port}"
 
     def local_url(self) -> str:
         return f"http://127.0.0.1:{self.port}"
