@@ -328,6 +328,67 @@ class DeployWizard(QDialog):
         v.addWidget(_lbl("Choose your app source.", C_TEXT3, 12))
         v.addWidget(_sep())
 
+        # ── Stack type ────────────────────────────────────────────────────────
+        v.addWidget(_lbl("STACK TYPE", C_TEXT3, 10))
+
+        # Explicit button group keeps stack radios isolated from source radios
+        self._stack_group = QButtonGroup(w)
+
+        stack_row = QHBoxLayout()
+        stack_row.setSpacing(10)
+        self._rb_stack_laravel = QRadioButton("Laravel (PHP)")
+        self._rb_stack_static  = QRadioButton("Static HTML")
+        self._rb_stack_other   = QRadioButton("Other")
+        self._rb_stack_laravel.setChecked(True)
+
+        _stack_rb_style = (
+            f"QRadioButton{{color:{C_TEXT2};font-size:13px;spacing:8px;}}"
+            f"QRadioButton::indicator{{width:15px;height:15px;"
+            f"border-radius:8px;border:2px solid {C_BORDER2};}}"
+            f"QRadioButton::indicator:checked{{background:{C_BLUE};"
+            f"border:2px solid {C_BLUE};}}"
+        )
+        for rb in (self._rb_stack_laravel, self._rb_stack_static, self._rb_stack_other):
+            rb.setStyleSheet(_stack_rb_style)
+            self._stack_group.addButton(rb)
+            stack_row.addWidget(rb)
+        stack_row.addStretch()
+        v.addLayout(stack_row)
+
+        # Hint label that updates with stack selection
+        self._stack_hint = _lbl(
+            "Provisions PostgreSQL database, MinIO S3 bucket, and PHP environment.",
+            C_TEXT3, 11,
+        )
+        self._stack_hint.setWordWrap(True)
+        v.addWidget(self._stack_hint)
+
+        def _update_stack_hint():
+            if self._rb_stack_laravel.isChecked():
+                self._stack_hint.setText(
+                    "Provisions PostgreSQL database, MinIO S3 bucket, and PHP environment."
+                )
+            elif self._rb_stack_static.isChecked():
+                self._stack_hint.setText(
+                    "Serves static files only — no database, bucket, or PHP runtime."
+                )
+            else:
+                self._stack_hint.setText(
+                    "Generic deployment — files only. No database or bucket provisioned."
+                )
+
+        self._rb_stack_laravel.toggled.connect(lambda _: _update_stack_hint())
+        self._rb_stack_static.toggled.connect(lambda _: _update_stack_hint())
+        self._rb_stack_other.toggled.connect(lambda _: _update_stack_hint())
+
+        v.addWidget(_sep())
+
+        # ── Source ────────────────────────────────────────────────────────────
+        v.addWidget(_lbl("SOURCE", C_TEXT3, 10))
+
+        # Explicit button group keeps source radios isolated from stack radios
+        self._source_group = QButtonGroup(w)
+
         self._rb_zip = QRadioButton("Upload ZIP archive")
         self._rb_git = QRadioButton("Clone from Git repository")
         for rb in (self._rb_zip, self._rb_git):
@@ -338,6 +399,7 @@ class DeployWizard(QDialog):
                 f"QRadioButton::indicator:checked{{background:{C_BLUE};"
                 f"border:2px solid {C_BLUE};}}"
             )
+            self._source_group.addButton(rb)
             v.addWidget(rb)
         self._rb_zip.setChecked(True)
 
@@ -551,6 +613,13 @@ class DeployWizard(QDialog):
         source_path = self._zip_path if source_type == "zip" else self._git_url.text().strip()
         git_branch  = self._git_branch.text().strip() or "main"
 
+        if self._rb_stack_laravel.isChecked():
+            stack_type = "laravel"
+        elif self._rb_stack_static.isChecked():
+            stack_type = "static"
+        else:
+            stack_type = "other"
+
         def _work(progress_cb):
             from core.app_manager import provision_app
 
@@ -562,6 +631,7 @@ class DeployWizard(QDialog):
                 git_branch=git_branch,
                 admin_config=self._cfg,
                 progress=progress_cb,
+                stack_type=stack_type,
             )
 
             # Start process — use the saved php_extensions from the app record
@@ -1445,6 +1515,23 @@ class AppsTab(QWidget):
         dom_btn.clicked.connect(lambda _=False, d=domain: webbrowser.open(f"http://{d}"))
         row.addWidget(dom_btn)
 
+        # Stack badge
+        stack_type = app.get("stack_type", "laravel")
+        stack_labels = {"laravel": "PHP", "static": "HTML", "other": "OTHER"}
+        stack_colors = {"laravel": C_BLUE, "static": C_GREEN, "other": C_AMBER}
+        stack_text  = stack_labels.get(stack_type, stack_type.upper())
+        stack_color = stack_colors.get(stack_type, C_TEXT3)
+        sk_lbl = QLabel(stack_text)
+        sk_lbl.setFixedWidth(46)
+        sk_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        sk_lbl.setStyleSheet(
+            f"color:{stack_color};background:{stack_color}22;"
+            f"border:1px solid {stack_color}55;"
+            f"border-radius:4px;font-size:9px;font-weight:800;"
+            f"letter-spacing:0.8px;padding:2px 4px;"
+        )
+        row.addWidget(sk_lbl)
+
         # Status badge
         status = app.get("status", "stopped")
         color  = C_GREEN if status == "running" else C_RED if status == "error" else C_TEXT3
@@ -1459,11 +1546,12 @@ class AppsTab(QWidget):
         )
         row.addWidget(st_lbl)
 
-        # DB name
-        db_lbl = QLabel(app.get("database", "—"))
+        # DB name — only meaningful for Laravel apps
+        db_text = app.get("database", "—") if stack_type == "laravel" else "—"
+        db_lbl = QLabel(db_text)
         db_lbl.setFixedWidth(140)
         db_lbl.setStyleSheet(
-            f"color:{C_TEXT2};font-size:12px;"
+            f"color:{C_TEXT2 if stack_type == 'laravel' else C_TEXT3};font-size:12px;"
             f"font-family:'Consolas','Courier New',monospace;background:transparent;"
         )
         row.addWidget(db_lbl)
@@ -1498,6 +1586,9 @@ class AppsTab(QWidget):
                 b.setEnabled(not is_running)
             elif text == "Stop":
                 b.setEnabled(is_running)
+            # PHP ext manager and Artisan are Laravel-only
+            elif text in ("PHP", "Artisan") and stack_type != "laravel":
+                b.setVisible(False)
             b.clicked.connect(fn)
             row.addWidget(b)
 
@@ -1617,15 +1708,24 @@ class AppsTab(QWidget):
         self._workers.append(w)
 
     def _delete(self, app: dict):
+        stack_type = app.get("stack_type", "laravel")
+        is_laravel = stack_type == "laravel"
+
+        extra_lines = ""
+        if is_laravel:
+            extra_lines = (
+                f"  • Drop database '{app.get('database','')}' and its user\n"
+                f"  • Drop MinIO bucket '{app.get('bucket','')}'\n"
+                f"  • Remove the PHP ini configuration\n"
+            )
+
         reply = QMessageBox.question(
             self, "Delete App",
             f"Permanently delete '{app.get('display_name', app['id'])}'?\n\n"
             "This will:\n"
             f"  • Delete all app files in {app.get('folder','')}\n"
-            f"  • Drop database '{app.get('database','')}' and its user\n"
-            f"  • Drop MinIO bucket '{app.get('bucket','')}'\n"
-            f"  • Remove the PHP ini configuration\n\n"
-            "This CANNOT be undone.",
+            + extra_lines +
+            "\nThis CANNOT be undone.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if reply != QMessageBox.StandardButton.Yes:

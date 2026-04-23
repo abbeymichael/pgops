@@ -354,9 +354,17 @@ def provision_app(
     admin_config: dict = None,
     progress: Progress = None,
     required_extensions: set[str] | None = None,
+    stack_type: str = "laravel",  # "laravel" | "static" | "other"
 ) -> dict:
     """
-    Full provisioning pipeline for a new Laravel app.
+    Full provisioning pipeline for a new app.
+
+    For Laravel apps (stack_type="laravel") the full pipeline runs:
+      files → PHP ini → database → MinIO bucket → .env → key:generate → migrate.
+
+    For non-Laravel stacks (stack_type="static", "other") only files are
+    extracted/cloned; no database, bucket, or PHP ini is created.
+
     Returns the completed app dict on success.
     On any step failure, performs a full rollback (files + DB + bucket + php.ini)
     then raises RuntimeError with a descriptive message.
@@ -414,151 +422,158 @@ def provision_app(
     else:
         _step(label, "done")
 
-    # ── 2. PHP ini (pre-DB so artisan commands get the right extensions) ───────
-    _step("Preparing PHP environment")
+    is_laravel = (stack_type == "laravel")
+
+    # ── 2-7: Laravel-only steps (PHP ini, DB, bucket, .env, artisan) ──────────
     ini_path: Optional[Path] = None
-    try:
-        from core.frankenphp_manager import (
-            ensure_app_php_ini,
-            LARAVEL_REQUIRED_EXTENSIONS,
-            get_frankenphp_bin,
-        )
-
-        exts = (
-            required_extensions
-            if required_extensions is not None
-            else LARAVEL_REQUIRED_EXTENSIONS
-        )
-        bin_path = str(get_frankenphp_bin())
-        ini_path, missing = ensure_app_php_ini(slug, exts, bin_path)
-        _created_ini = True
-    except Exception:
-        pass  # non-fatal — app will start without a custom ini
-    _step("Preparing PHP environment", "done")
-    if ini_path and missing:
-        _step(
-            f"PHP extensions not found (will warn): {', '.join(sorted(missing))}",
-            "done",
-        )
-
-    # ── 3. Database ───────────────────────────────────────────────────────────
-    _step(f"Creating database '{db_name}'")
-    try:
-        import core.db_manager as dbm
-
-        ok, msg = dbm.create_database(
-            db_name,
-            db_user,
-            db_password,
-            cfg.get("username", "postgres"),
-            cfg.get("password", "postgres"),
-            cfg.get("port", 5432),
-        )
-        if not ok:
-            raise RuntimeError(msg)
-        _created_db = True
-    except Exception as exc:
-        _step(f"Creating database '{db_name}'", "error")
-        _full_rollback(f"Database creation failed: {exc}")
-    else:
-        _step(f"Creating database '{db_name}'", "done")
-
-    # ── 4. MinIO bucket ───────────────────────────────────────────────────────
-    _step(f"Creating bucket '{bucket_name}'")
     access_key = secret_key = ""
-    try:
-        from core.bucket_manager import create_bucket
+    exts_list: list[str] = []
 
-        ok, msg, creds = create_bucket(bucket_name, slug)
-        if not ok:
-            raise RuntimeError(msg)
-        access_key = creds.get("access_key", "")
-        secret_key = creds.get("secret_key", "")
-        _created_bucket = True
-    except Exception as exc:
-        _step(f"Creating bucket '{bucket_name}'", "error")
-        _full_rollback(f"Bucket creation failed: {exc}")
-    else:
-        _step(f"Creating bucket '{bucket_name}'", "done")
+    if is_laravel:
+        # ── 2. PHP ini (pre-DB so artisan commands get the right extensions) ──
+        _step("Preparing PHP environment")
+        try:
+            from core.frankenphp_manager import (
+                ensure_app_php_ini,
+                LARAVEL_REQUIRED_EXTENSIONS,
+                get_frankenphp_bin,
+            )
 
-    # ── 5. .env ───────────────────────────────────────────────────────────────
-    _step("Writing .env file")
-    try:
-        write_laravel_env(
-            app_folder,
-            {
-                "APP_NAME": display_name,
-                "APP_ENV": "production",
-                "APP_KEY": "",  # generated later by artisan key:generate
-                "APP_DEBUG": "false",
-                "APP_URL": f"https://{domain}",
-                "DB_CONNECTION": "pgsql",
-                "DB_HOST": "pgops.local",
-                "DB_PORT": "5432",
-                "DB_DATABASE": db_name,
-                "DB_USERNAME": db_user,
-                "DB_PASSWORD": db_password,
-                #"DB_SSLMODE": "require",
-                "FILESYSTEM_DISK": "s3",
-                "AWS_ACCESS_KEY_ID": access_key,
-                "AWS_SECRET_ACCESS_KEY": secret_key,
-                "AWS_DEFAULT_REGION": "us-east-1",
-                "AWS_BUCKET": bucket_name,
-                "AWS_ENDPOINT": "https://pgops.local:9000",
-                "AWS_USE_PATH_STYLE_ENDPOINT": "true",
-            },
-        )
-    except Exception as exc:
-        _step("Writing .env file", "error")
-        _full_rollback(f".env write failed: {exc}")
-    else:
-        _step("Writing .env file", "done")
+            exts = (
+                required_extensions
+                if required_extensions is not None
+                else LARAVEL_REQUIRED_EXTENSIONS
+            )
+            bin_path = str(get_frankenphp_bin())
+            ini_path, missing = ensure_app_php_ini(slug, exts, bin_path)
+            _created_ini = True
+        except Exception:
+            pass  # non-fatal — app will start without a custom ini
+        _step("Preparing PHP environment", "done")
+        if ini_path and missing:
+            _step(
+                f"PHP extensions not found (will warn): {', '.join(sorted(missing))}",
+                "done",
+            )
 
-    # ── 6. key:generate ───────────────────────────────────────────────────────
-    _step("Running artisan key:generate")
-    try:
-        run_artisan(
-            app_folder,
-            ["key:generate"],
-            php_ini_path=str(ini_path) if ini_path else None,
-            strict=True,
-        )
-    except Exception as exc:
-        _step("Running artisan key:generate", "error")
-        _full_rollback(f"key:generate failed: {exc}")
-    else:
-        _step("Running artisan key:generate", "done")
+        # ── 3. Database ───────────────────────────────────────────────────────
+        _step(f"Creating database '{db_name}'")
+        try:
+            import core.db_manager as dbm
 
-    # ── 7. migrate ────────────────────────────────────────────────────────────
-    _step("Running artisan migrate")
-    try:
-        run_artisan(
-            app_folder,
-            ["migrate", "--force"],
-            php_ini_path=str(ini_path) if ini_path else None,
-            strict=True,
-        )
-    except Exception as exc:
-        _step("Running artisan migrate", "error")
-        _full_rollback(f"migrate failed: {exc}")
-    else:
-        _step("Running artisan migrate", "done")
+            ok, msg = dbm.create_database(
+                db_name,
+                db_user,
+                db_password,
+                cfg.get("username", "postgres"),
+                cfg.get("password", "postgres"),
+                cfg.get("port", 5432),
+            )
+            if not ok:
+                raise RuntimeError(msg)
+            _created_db = True
+        except Exception as exc:
+            _step(f"Creating database '{db_name}'", "error")
+            _full_rollback(f"Database creation failed: {exc}")
+        else:
+            _step(f"Creating database '{db_name}'", "done")
+
+        # ── 4. MinIO bucket ───────────────────────────────────────────────────
+        _step(f"Creating bucket '{bucket_name}'")
+        try:
+            from core.bucket_manager import create_bucket
+
+            ok, msg, creds = create_bucket(bucket_name, slug)
+            if not ok:
+                raise RuntimeError(msg)
+            access_key = creds.get("access_key", "")
+            secret_key = creds.get("secret_key", "")
+            _created_bucket = True
+        except Exception as exc:
+            _step(f"Creating bucket '{bucket_name}'", "error")
+            _full_rollback(f"Bucket creation failed: {exc}")
+        else:
+            _step(f"Creating bucket '{bucket_name}'", "done")
+
+        # ── 5. .env ───────────────────────────────────────────────────────────
+        _step("Writing .env file")
+        try:
+            write_laravel_env(
+                app_folder,
+                {
+                    "APP_NAME": display_name,
+                    "APP_ENV": "production",
+                    "APP_KEY": "",  # generated later by artisan key:generate
+                    "APP_DEBUG": "false",
+                    "APP_URL": f"https://{domain}",
+                    "DB_CONNECTION": "pgsql",
+                    "DB_HOST": "pgops.local",
+                    "DB_PORT": "5432",
+                    "DB_DATABASE": db_name,
+                    "DB_USERNAME": db_user,
+                    "DB_PASSWORD": db_password,
+                    #"DB_SSLMODE": "require",
+                    "FILESYSTEM_DISK": "s3",
+                    "AWS_ACCESS_KEY_ID": access_key,
+                    "AWS_SECRET_ACCESS_KEY": secret_key,
+                    "AWS_DEFAULT_REGION": "us-east-1",
+                    "AWS_BUCKET": bucket_name,
+                    "AWS_ENDPOINT": "https://pgops.local:9000",
+                    "AWS_USE_PATH_STYLE_ENDPOINT": "true",
+                },
+            )
+        except Exception as exc:
+            _step("Writing .env file", "error")
+            _full_rollback(f".env write failed: {exc}")
+        else:
+            _step("Writing .env file", "done")
+
+        # ── 6. key:generate ───────────────────────────────────────────────────
+        _step("Running artisan key:generate")
+        try:
+            run_artisan(
+                app_folder,
+                ["key:generate"],
+                php_ini_path=str(ini_path) if ini_path else None,
+                strict=True,
+            )
+        except Exception as exc:
+            _step("Running artisan key:generate", "error")
+            _full_rollback(f"key:generate failed: {exc}")
+        else:
+            _step("Running artisan key:generate", "done")
+
+        # ── 7. migrate ────────────────────────────────────────────────────────
+        _step("Running artisan migrate")
+        try:
+            run_artisan(
+                app_folder,
+                ["migrate", "--force"],
+                php_ini_path=str(ini_path) if ini_path else None,
+                strict=True,
+            )
+        except Exception as exc:
+            _step("Running artisan migrate", "error")
+            _full_rollback(f"migrate failed: {exc}")
+        else:
+            _step("Running artisan migrate", "done")
+
+        from core.frankenphp_manager import LARAVEL_REQUIRED_EXTENSIONS
+        exts_list = sorted(required_extensions or LARAVEL_REQUIRED_EXTENSIONS)
 
     # ── 8. Build registry entry ───────────────────────────────────────────────
-    from core.frankenphp_manager import LARAVEL_REQUIRED_EXTENSIONS
-
-    exts_list = sorted(required_extensions or LARAVEL_REQUIRED_EXTENSIONS)
-
     app = {
         "id": slug,
+        "stack_type": stack_type,
         "display_name": display_name,
         "folder": app_folder,
         "internal_port": internal_port,
         "domain": domain,
-        "database": db_name,
-        "db_username": db_user,
-        "db_password": db_password,
-        "bucket": bucket_name,
+        # Laravel-only fields (empty strings for other stacks)
+        "database": db_name if is_laravel else "",
+        "db_username": db_user if is_laravel else "",
+        "db_password": db_password if is_laravel else "",
+        "bucket": bucket_name if is_laravel else "",
         "bucket_access_key": access_key,
         "bucket_secret_key": secret_key,
         "git_remote": source_path if source_type == "git" else "",
@@ -597,13 +612,17 @@ def delete_app(
     _step("Stopping app process")
     _step("Stopping app process", "done")
 
-    _step(f"Dropping database '{app['database']}'")
-    _rollback_database(app["database"], app.get("db_username", ""), admin_config)
-    _step(f"Dropping database '{app['database']}'", "done")
+    is_laravel = (app.get("stack_type", "laravel") == "laravel")
 
-    _step(f"Dropping bucket '{app['bucket']}'")
-    _rollback_bucket(app["bucket"])
-    _step(f"Dropping bucket '{app['bucket']}'", "done")
+    if is_laravel and app.get("database"):
+        _step(f"Dropping database '{app['database']}'")
+        _rollback_database(app["database"], app.get("db_username", ""), admin_config)
+        _step(f"Dropping database '{app['database']}'", "done")
+
+    if is_laravel and app.get("bucket"):
+        _step(f"Dropping bucket '{app['bucket']}'")
+        _rollback_bucket(app["bucket"])
+        _step(f"Dropping bucket '{app['bucket']}'", "done")
 
     _step("Deleting app files")
     _rollback_files(app["folder"])

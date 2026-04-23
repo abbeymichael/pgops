@@ -227,6 +227,12 @@ def generate_caddyfile(
     minio.pgops.local, console.pgops.local and pgadmin.pgops.local are always
     written — if the upstream service isn't running Caddy returns 502 which is
     the correct, user-friendly behaviour (vs DNS failure).
+
+    NOTE: http_port is intentionally NOT set in the global block. Setting it
+    globally causes Caddy to bind that port system-wide, which conflicts with
+    the Landing server already running on 8080. Instead the HTTP redirect site
+    blocks name the port explicitly (http://pgops.local:8080) so Caddy only
+    binds it for those virtual hosts.
     """
     caddy_data = str(get_caddy_data_dir()).replace("\\", "/")
     cert_f = cert_file.replace("\\", "/") if cert_file else ""
@@ -252,10 +258,10 @@ def generate_caddyfile(
         https_wild_target = f"https://{{host}}:{https_port}{{uri}}"
 
     # ── Global block ────────────────────────────────────────────────────────
+    # http_port is intentionally omitted here — see docstring above.
     lines = [
         "{",
         f"    admin 127.0.0.1:{admin_port}",
-        f"    http_port {http_port}",
         f"    https_port {https_port}",
         "    storage file_system {",
         f"        root {caddy_data}",
@@ -286,19 +292,28 @@ def generate_caddyfile(
     # ── Helper: one HTTPS reverse-proxy site block ──────────────────────────
     def site_block(host_expr: str, upstream_port: int, extra_directives: list = None) -> list[str]:
         """
-        host_expr      — full site address e.g. "pgadmin.pgops.local:8443"
-        upstream_port  — local port to proxy to
-        extra_directives — optional list of extra Caddy directive lines
+        host_expr         — full site address e.g. "pgadmin.pgops.local:8443"
+        upstream_port     — local port to proxy to
+        extra_directives  — optional reverse_proxy subdirectives (e.g. header_up).
+                            These are nested INSIDE the reverse_proxy block, not
+                            listed as siblings of it — Caddy requires this.
         """
-        block = [
-            f"{host_expr} {{",
-            tls_dir,
-            f"    reverse_proxy 127.0.0.1:{upstream_port}",
-        ]
         if extra_directives:
+            block = [
+                f"{host_expr} {{",
+                tls_dir,
+                f"    reverse_proxy 127.0.0.1:{upstream_port} {{",
+            ]
             for d in extra_directives:
-                block.append(f"    {d}")
-        block += ["}", ""]
+                block.append(f"        {d}")
+            block += ["    }", "}", ""]
+        else:
+            block = [
+                f"{host_expr} {{",
+                tls_dir,
+                f"    reverse_proxy 127.0.0.1:{upstream_port}",
+                "}", "",
+            ]
         return block
 
     def subdomain_block(subdomain: str, upstream_port: int, extra_directives: list = None) -> list[str]:
@@ -321,7 +336,8 @@ def generate_caddyfile(
     lines += subdomain_block("minio.pgops.local", minio_api_port)
 
     # ── console.pgops.local → MinIO Web Console ───────────────────────────────
-    # MinIO console needs WebSocket support for live updates
+    # MinIO console needs WebSocket support for live updates.
+    # header_up directives are nested inside reverse_proxy (required by Caddy).
     lines += subdomain_block(
         "console.pgops.local",
         minio_console_port,
@@ -334,6 +350,7 @@ def generate_caddyfile(
     # ── pgadmin.pgops.local → pgAdmin 4 ──────────────────────────────────────
     # pgAdmin runs on plain HTTP internally; Caddy provides the HTTPS frontend.
     # Always written — returns 502 if pgAdmin is stopped (better than DNS fail).
+    # header_up directives are nested inside reverse_proxy (required by Caddy).
     lines += subdomain_block(
         "pgadmin.pgops.local",
         pgadmin_port,
@@ -394,6 +411,7 @@ class CaddyManager:
         self._log   = log_fn or print
         self._proc: Optional[subprocess.Popen] = None
         self._lock  = threading.Lock()
+        self._log_file = None  # kept open for the lifetime of the process
 
     def log(self, msg: str):
         self._log(msg)
@@ -464,6 +482,38 @@ class CaddyManager:
             return True
         return is_port_open(self.https_port) or is_port_open(self.http_port)
 
+    # ── Log file helpers ──────────────────────────────────────────────────────
+
+    def _get_log_path(self) -> Path:
+        return get_caddy_dir() / "caddy.log"
+
+    def _open_log_file(self):
+        """Open (or truncate) the Caddy log file and return the handle."""
+        try:
+            return open(self._get_log_path(), "w", encoding="utf-8")
+        except Exception:
+            return subprocess.DEVNULL
+
+    def _close_log_file(self):
+        if self._log_file and self._log_file is not subprocess.DEVNULL:
+            try:
+                self._log_file.close()
+            except Exception:
+                pass
+        self._log_file = None
+
+    def _read_log_tail(self, max_bytes: int = 4096) -> str:
+        """Return the last `max_bytes` of caddy.log for error reporting."""
+        log_path = self._get_log_path()
+        try:
+            size = log_path.stat().st_size
+            with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+                if size > max_bytes:
+                    f.seek(size - max_bytes)
+                return f.read().strip()
+        except Exception:
+            return ""
+
     # ── Start / Stop / Reload ─────────────────────────────────────────────────
 
     def start(self, apps: list, pgadmin_running: bool = False) -> tuple[bool, str]:
@@ -505,18 +555,23 @@ class CaddyManager:
         self._log(f"[Caddy] Caddyfile → {caddyfile}")
         self._log(f"[Caddy] TLS mode: {'mkcert' if cert_file else 'internal CA'}")
         self._log(f"[Caddy] Subdomains: pgops.local | minio.pgops.local | console.pgops.local | pgadmin.pgops.local")
+        self._log(f"[Caddy] Log → {self._get_log_path()}")
 
         env = _build_caddy_env()
         cmd = [str(get_caddy_bin()), "run", "--config", caddyfile]
 
         try:
+            self._close_log_file()
+            self._log_file = self._open_log_file()
+
             kwargs = _popen_kwargs()
-            kwargs["stdout"] = subprocess.DEVNULL
-            kwargs["stderr"] = subprocess.DEVNULL
+            kwargs["stdout"] = self._log_file
+            kwargs["stderr"] = self._log_file
             kwargs["env"]    = env
             with self._lock:
                 self._proc = subprocess.Popen(cmd, **kwargs)
         except Exception as exc:
+            self._close_log_file()
             return False, f"Failed to start Caddy: {exc}"
 
         for _ in range(40):
@@ -525,9 +580,12 @@ class CaddyManager:
             with self._lock:
                 proc = self._proc
             if proc is not None and proc.poll() is not None:
+                tail = self._read_log_tail()
+                self._close_log_file()
+                detail = f"\n\nCaddy output:\n{tail}" if tail else ""
                 return False, (
                     f"Caddy exited immediately (code {proc.returncode}). "
-                    "Check that the configured ports are free and the Caddyfile is valid."
+                    f"Log: {self._get_log_path()}{detail}"
                 )
 
             if is_caddy_admin_running(self.ADMIN_PORT):
@@ -547,10 +605,13 @@ class CaddyManager:
                     f"pgadmin.pgops.local | minio.pgops.local | console.pgops.local"
                 )
 
+        tail = self._read_log_tail()
         self.stop()
+        detail = f"\n\nCaddy output:\n{tail}" if tail else ""
         return False, (
-            "Caddy did not start in time (admin API not responding). "
-            "Possible causes: port conflict, firewall blocking, or invalid Caddyfile."
+            f"Caddy did not start in time (admin API not responding). "
+            f"Possible causes: port conflict, firewall blocking, or invalid Caddyfile. "
+            f"Log: {self._get_log_path()}{detail}"
         )
 
     def reload(self, apps: list = None, pgadmin_running: bool = False) -> tuple[bool, str]:
@@ -635,6 +696,8 @@ class CaddyManager:
                     proc.kill()
                 except Exception:
                     pass
+
+        self._close_log_file()
 
         if is_caddy_process_running():
             if platform.system() == "Windows":
