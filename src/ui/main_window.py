@@ -351,7 +351,7 @@ class MainWindow(QMainWindow):
         self._srv_tab = ServerTab(
             manager=self.manager,
             config=self.config,
-            seaweedfs=self.minio,  # back-compat; ServerTab alias to rustfs
+            rustfs=self.minio,  # back-compat; ServerTab alias to rustfs
             pgadmin=self.pgadmin,
             on_start=self._start,
             on_stop=self._stop,
