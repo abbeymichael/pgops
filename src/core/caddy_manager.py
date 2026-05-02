@@ -7,8 +7,8 @@ Architecture (post-mkcert migration):
   - mkcert CA is trusted system-wide → zero browser warnings on LAN
   - Every service gets its own subdomain under pgops.local:
       pgops.local              → landing page        (port 8080)
-      s3.pgops.local           → SeaweedFS S3 API    (port 8333)
-      filer.pgops.local        → SeaweedFS Filer UI  (port 8888)
+      s3.pgops.local           → RustFS S3 API      (port 9000)
+      console.pgops.local      → RustFS Web Console  (port 9001)
       pgadmin.pgops.local      → pgAdmin             (port 5050)
       <app>.pgops.local        → Laravel apps        (port 8081+)
   - HTTP is redirected to HTTPS automatically
@@ -16,7 +16,7 @@ Architecture (post-mkcert migration):
   - Caddy is NOT assumed to be running as admin; ports ≥1024 are used
     by default so no elevated privileges are needed
 
-NOTE: s3.pgops.local, filer.pgops.local, and pgadmin.pgops.local are
+NOTE: s3.pgops.local, console.pgops.local, and pgadmin.pgops.local are
 ALWAYS included in the Caddyfile regardless of whether those services are
 currently running. Caddy will return a 502 if the upstream isn't up, which
 is the correct behaviour — the domain still resolves and the user gets a
@@ -210,8 +210,8 @@ def generate_caddyfile(
     https_port:   int = 8443,
     landing_port: int = 8081,
     admin_port:   int = 2019,
-    seaweedfs_s3_port:    int = 8333,
-    seaweedfs_filer_port: int = 8888,
+    rustfs_api_port:     int = 9000,
+    rustfs_console_port: int = 9001,
     pgadmin_port:         int = 5050,
     pgadmin_enabled:      bool = True,   # always True now — Caddy routes it regardless
     cert_file: str = "",
@@ -221,10 +221,10 @@ def generate_caddyfile(
     Generate a Caddyfile that:
       1. Redirects all HTTP → HTTPS (port-aware for non-standard ports)
       2. Uses the mkcert cert+key when available, or `tls internal` as fallback
-      3. Routes every known service subdomain (s3, filer, pgadmin ALWAYS)
+      3. Routes every known service subdomain (s3, console, pgadmin ALWAYS)
       4. Routes every deployed app subdomain
 
-    s3.pgops.local, filer.pgops.local and pgadmin.pgops.local are always
+    s3.pgops.local, console.pgops.local and pgadmin.pgops.local are always
     written — if the upstream service isn't running Caddy returns 502 which is
     the correct, user-friendly behaviour (vs DNS failure).
 
@@ -332,15 +332,15 @@ def generate_caddyfile(
         "",
     ]
 
-    # ── s3.pgops.local → SeaweedFS S3 API ──────────────────────────────────────
-    lines += subdomain_block("s3.pgops.local", seaweedfs_s3_port)
+    # ── s3.pgops.local → RustFS S3 API ──────────────────────────────────────────
+    lines += subdomain_block("s3.pgops.local", rustfs_api_port)
 
-    # ── filer.pgops.local → SeaweedFS Filer UI ──────────────────────────────────
+    # ── console.pgops.local → RustFS Web Console ─────────────────────────────────
     # Filer UI uses long-polling / SSE; pass Host + real IP through.
     # header_up directives are nested inside reverse_proxy (required by Caddy).
     lines += subdomain_block(
-        "filer.pgops.local",
-        seaweedfs_filer_port,
+        "console.pgops.local",
+        rustfs_console_port,
         extra_directives=[
             "header_up Host {host}",
             "header_up X-Real-IP {remote_host}",
@@ -431,12 +431,12 @@ class CaddyManager:
         return self.config.get("landing_port", 8081)
 
     @property
-    def seaweedfs_s3_port(self) -> int:
-        return self.config.get("seaweedfs_s3_port", 8333)
+    def rustfs_api_port(self) -> int:
+        return self.config.get("rustfs_api_port", 9000)
 
     @property
-    def seaweedfs_filer_port(self) -> int:
-        return self.config.get("seaweedfs_filer_port", 8888)
+    def rustfs_console_port(self) -> int:
+        return self.config.get("rustfs_console_port", 9001)
 
     @property
     def pgadmin_port(self) -> int:
@@ -545,8 +545,8 @@ class CaddyManager:
             https_port=self.https_port,
             landing_port=self.landing_port,
             admin_port=self.ADMIN_PORT,
-            seaweedfs_s3_port=self.seaweedfs_s3_port,
-            seaweedfs_filer_port=self.seaweedfs_filer_port,
+            rustfs_api_port=self.rustfs_api_port,
+            rustfs_console_port=self.rustfs_console_port,
             pgadmin_port=self.pgadmin_port,
             pgadmin_enabled=True,   # always include pgadmin block
             cert_file=cert_file,
@@ -554,7 +554,7 @@ class CaddyManager:
         )
         self._log(f"[Caddy] Caddyfile → {caddyfile}")
         self._log(f"[Caddy] TLS mode: {'mkcert' if cert_file else 'internal CA'}")
-        self._log(f"[Caddy] Subdomains: pgops.local | s3.pgops.local | filer.pgops.local | pgadmin.pgops.local")
+        self._log(f"[Caddy] Subdomains: pgops.local | s3.pgops.local | console.pgops.local | pgadmin.pgops.local")
         self._log(f"[Caddy] Log → {self._get_log_path()}")
 
         env = _build_caddy_env()
@@ -596,13 +596,13 @@ class CaddyManager:
                     f"[Caddy] Access your services at:\n"
                     f"[Caddy]   https://pgops.local:{self.https_port}\n"
                     f"[Caddy]   https://s3.pgops.local:{self.https_port}\n"
-                    f"[Caddy]   https://filer.pgops.local:{self.https_port}\n"
+                    f"[Caddy]   https://console.pgops.local:{self.https_port}\n"
                     f"[Caddy]   https://pgadmin.pgops.local:{self.https_port}"
                     + (f"\n[Caddy]   +{app_count} app subdomain(s)" if app_count else "")
                 )
                 return True, (
                     f"Caddy started ({tls_mode}). "
-                    f"pgadmin.pgops.local | s3.pgops.local | filer.pgops.local"
+                    f"pgadmin.pgops.local | s3.pgops.local | console.pgops.local"
                 )
 
         tail = self._read_log_tail()
@@ -627,8 +627,8 @@ class CaddyManager:
                 https_port=self.https_port,
                 landing_port=self.landing_port,
                 admin_port=self.ADMIN_PORT,
-                seaweedfs_s3_port=self.seaweedfs_s3_port,
-                seaweedfs_filer_port=self.seaweedfs_filer_port,
+                rustfs_api_port=self.rustfs_api_port,
+                rustfs_console_port=self.rustfs_console_port,
                 pgadmin_port=self.pgadmin_port,
                 pgadmin_enabled=True,   # always include pgadmin block
                 cert_file=cert_file,
@@ -730,8 +730,8 @@ class CaddyManager:
             https_port=self.https_port,
             landing_port=self.landing_port,
             admin_port=self.ADMIN_PORT,
-            seaweedfs_s3_port=self.seaweedfs_s3_port,
-            seaweedfs_filer_port=self.seaweedfs_filer_port,
+            rustfs_api_port=self.rustfs_api_port,
+            rustfs_console_port=self.rustfs_console_port,
             pgadmin_port=self.pgadmin_port,
             pgadmin_enabled=True,
             cert_file=cert_file,
@@ -771,22 +771,31 @@ class CaddyManager:
             return "https://pgadmin.pgops.local"
         return f"https://pgadmin.pgops.local:{self.https_port}"
 
-    def seaweedfs_s3_url(self) -> str:
+    def seaweedfs_s3_url(self) -> str:  # back-compat alias → rustfs_api_url
+        return self.rustfs_api_url()
+
+    def seaweedfs_filer_url(self) -> str:  # back-compat alias → rustfs_console_url
+        return self.rustfs_console_url()
+
+    # Back-compat aliases for any remaining callers
+    def rustfs_api_url(self) -> str:
+        """Public HTTPS URL for the RustFS S3 API endpoint."""
         if self.https_port == 443:
             return "https://s3.pgops.local"
         return f"https://s3.pgops.local:{self.https_port}"
 
-    def seaweedfs_filer_url(self) -> str:
+    def rustfs_console_url(self) -> str:
+        """Public HTTPS URL for the RustFS web console."""
         if self.https_port == 443:
-            return "https://filer.pgops.local"
-        return f"https://filer.pgops.local:{self.https_port}"
+            return "https://console.pgops.local"
+        return f"https://console.pgops.local:{self.https_port}"
 
-    # Back-compat aliases for any remaining callers
+    # Back-compat aliases so any old callsites keep working
     def minio_url(self) -> str:
-        return self.seaweedfs_s3_url()
+        return self.rustfs_api_url()
 
     def minio_console_url(self) -> str:
-        return self.seaweedfs_filer_url()
+        return self.rustfs_console_url()
 
     # ── Legacy compat ─────────────────────────────────────────────────────────
 

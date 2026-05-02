@@ -1,11 +1,11 @@
 """
 files_tab.py
-SeaweedFS storage management UI.
+RustFS storage management UI.
 
 Layout
 ──────
   ┌──────────────── header bar ─────────────────────────────┐
-  │  Persistent Storage   [SEAWEEDFS]  ● RUNNING  ▶ ■  Open │
+  │  Persistent Storage   [RUSTFS]  ● RUNNING  ▶ ■  Open │
   ├──────────┬──────────────────────────────────────────────┤
   │  BUCKETS │  breadcrumb  /  object toolbar               │
   │  ──────  ├──────────────────────────────────────────────┤
@@ -21,7 +21,7 @@ S3 compatibility
   Credentials shown always use:
     AWS_USE_PATH_STYLE_ENDPOINT=true
     AWS_DEFAULT_REGION=us-east-1
-  These are the two settings MinIO-to-SeaweedFS migrations most often miss.
+  These are the two settings MinIO-to-RustFS migrations most often miss.
 """
 
 import os
@@ -1077,13 +1077,13 @@ class _BucketSidebar(QWidget):
 
 class FilesTab(QWidget):
     """
-    Full SeaweedFS storage management tab.
-    Instantiate with: FilesTab(seaweedfs_manager)
+    Full RustFS storage management tab.
+    Instantiate with: FilesTab(rustfs_manager)
     """
 
-    def __init__(self, seaweedfs_manager, parent=None):
+    def __init__(self, rustfs_manager, parent=None):
         super().__init__(parent)
-        self.minio    = seaweedfs_manager
+        self.minio    = rustfs_manager
         self._workers = []
         self._build_ui()
 
@@ -1112,7 +1112,7 @@ class FilesTab(QWidget):
         pg_title.setStyleSheet(
             f"color:{C_TEXT};font-size:16px;font-weight:700;background:transparent;"
         )
-        badge = QLabel("SEAWEEDFS")
+        badge = QLabel("RUSTFS")
         badge.setStyleSheet(
             f"color:{C_TEXT3};background:{C_SURF2};border:1px solid {C_BORDER2};"
             f"border-radius:4px;font-size:9px;font-weight:800;"
@@ -1220,7 +1220,7 @@ class FilesTab(QWidget):
     def _start(self):
         if not self.minio.is_binaries_available():
             QMessageBox.information(self, "Setup Required",
-                "Click '⚙ Setup' first to download the SeaweedFS binary.")
+                "Click '⚙ Setup' first to download the RustFS binary.")
             return
         self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(False)
@@ -1237,7 +1237,7 @@ class FilesTab(QWidget):
                 self._sidebar.load()
             else:
                 QMessageBox.critical(
-                    self, "SeaweedFS Failed to Start",
+                    self, "RustFS Failed to Start",
                     f"{msg}\n\nCheck the log file for details."
                 )
 
@@ -1283,7 +1283,7 @@ class FilesTab(QWidget):
         import webbrowser, socket as _socket
         if not self.minio.is_running():
             QMessageBox.information(self, "Storage Not Running",
-                "Start SeaweedFS first.")
+                "Start RustFS first.")
             return
         caddy_port = self.minio.https_port
         caddy_up = False
@@ -1326,7 +1326,7 @@ class FilesTab(QWidget):
     def _create_bucket(self):
         if not self.minio.is_running():
             QMessageBox.warning(self, "Storage Not Running",
-                "Start SeaweedFS first.")
+                "Start RustFS first.")
             return
         dlg = CreateBucketDialog(self)
         if dlg.exec() != QDialog.DialogCode.Accepted:

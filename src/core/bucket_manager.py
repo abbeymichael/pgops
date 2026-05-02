@@ -1,19 +1,19 @@
 """
 bucket_manager.py
-SeaweedFS bucket, credential, and object management.
+RustFS bucket, credential, and object management.
 
 Architecture
 ────────────
-• Local SQLite store  (seaweedfs-data/pgops_storage.db)
+• Local SQLite store  (rustfs-data/pgops_storage.db)
   - Persists access key + secret so they survive restarts.
   - Makes credential lookup O(1) — no IAM walk per bucket.
   - Tracks bucket metadata (policy, created_at, app_name).
 
-• SeaweedFS IAM API  (http://127.0.0.1:<s3_port>/?Action=…)
+• RustFS IAM API  (http://127.0.0.1:<s3_port>/?Action=…)
   - CreateUser / CreateAccessKey / AttachUserPolicy / DeleteUser etc.
   - Mirrors AWS IAM XML API.
 
-• SeaweedFS S3 API   (http://127.0.0.1:<s3_port>/<bucket>)
+• RustFS S3 API   (http://127.0.0.1:<s3_port>/<bucket>)
   - Standard S3 REST: ListObjectsV2, PutObject, GetObject, DeleteObject,
     CreateMultipartUpload, UploadPart, CompleteMultipartUpload,
     DeleteObjects (multi-delete), GetBucketPolicy, PutBucketPolicy.
@@ -24,7 +24,7 @@ Architecture
 Authentication notes
 ────────────────────
   • All direct S3 API calls use AWS Signature V4 (Authorization header).
-    SeaweedFS S3 does NOT recognise HTTP Basic Auth for S3 operations —
+    RustFS S3 does NOT recognise HTTP Basic Auth for S3 operations —
     a Basic Auth header is silently treated as anonymous, which causes
     403 AccessDenied on any mutating operation (CreateBucket, PutObject …).
   • The IAM API endpoint (/?Action=…) does accept Basic Auth and continues
@@ -32,10 +32,10 @@ Authentication notes
   • _sigv4_headers() builds the required Authorization + x-amz-date +
     x-amz-content-sha256 headers for every direct S3 call.
 
-S3 compatibility notes for apps migrating from MinIO
-──────────────────────────────────────────────────────
+S3 compatibility notes
+──────────────────────
   • Path-style endpoints only: AWS_USE_PATH_STYLE_ENDPOINT=true
-  • Region: us-east-1  (SeaweedFS accepts any value; us-east-1 is safest)
+  • Region: us-east-1  (RustFS accepts any value; us-east-1 is safest)
   • Each bucket gets its own access key + secret scoped to that bucket only.
   • The admin credentials (from config) have full access — never expose them
     to app .env files; use the per-bucket credentials instead.
@@ -72,7 +72,7 @@ def _cfg() -> dict:
 
 
 def _s3_url(path: str = "") -> str:
-    port = _cfg().get("seaweedfs_s3_port", 8333)
+    port = _cfg().get("rustfs_api_port", 9000)
     return f"http://127.0.0.1:{port}{path}"
 
 
@@ -82,7 +82,7 @@ def _auth() -> tuple[str, str]:
 
 
 def _filer_url(path: str = "") -> str:
-    port = _cfg().get("seaweedfs_filer_port", 8888)
+    port = _cfg().get("rustfs_console_port", 9001)
     return f"http://127.0.0.1:{port}{path}"
 
 
@@ -90,7 +90,7 @@ def _filer_url(path: str = "") -> str:
 
 def _db_path() -> Path:
     from core.pg_manager import get_app_data_dir
-    d = get_app_data_dir() / "seaweedfs-data"
+    d = get_app_data_dir() / "rustfs-data"
     d.mkdir(parents=True, exist_ok=True)
     return d / "pgops_storage.db"
 
@@ -178,9 +178,9 @@ def _gen_access_key(prefix: str = "") -> str:
 
 # ── AWS Signature V4 — direct S3 request signing ─────────────────────────────
 #
-# SeaweedFS S3 requires AWS Signature V4 for authenticated operations.
+# RustFS S3 requires AWS Signature V4 for authenticated operations.
 # HTTP Basic Auth (requests' auth=(user, pw)) is silently treated as
-# anonymous by the SeaweedFS S3 gateway, causing 403 on any mutating
+# anonymous by the RustFS S3 gateway, causing 403 on any mutating
 # call (CreateBucket, PutObject, DeleteObject …).
 #
 # Usage:
@@ -205,7 +205,7 @@ def _sigv4_headers(
 ) -> dict:
     """
     Build AWS Signature V4 Authorization headers for a direct S3 request
-    against the internal SeaweedFS endpoint.
+    against the internal RustFS endpoint.
 
     Returns a dict of HTTP headers ready to pass to requests. Merge any
     additional headers (Content-Type, Content-MD5 …) into the returned dict
@@ -214,7 +214,7 @@ def _sigv4_headers(
     access_key, secret_key = _auth()
     region  = "us-east-1"
     service = "s3"
-    port    = _cfg().get("seaweedfs_s3_port", 8333)
+    port    = _cfg().get("rustfs_api_port", 9000)
     host    = f"127.0.0.1:{port}"
 
     now        = datetime.now(timezone.utc)
@@ -222,7 +222,7 @@ def _sigv4_headers(
     amz_date   = now.strftime("%Y%m%dT%H%M%SZ")
 
     # Use UNSIGNED-PAYLOAD so we never need to read file contents twice.
-    # SeaweedFS honours this just like AWS does for streaming uploads.
+    # RustFS honours this just like AWS does for streaming uploads.
     payload_hash = "UNSIGNED-PAYLOAD"
 
     # ── Canonical query string ────────────────────────────────────────────────
@@ -1160,7 +1160,7 @@ def get_object_url(
         port_suffix = f":{caddy_port}" if caddy_port != 443 else ""
         base_url = f"https://s3.pgops.local{port_suffix}"
     else:
-        s3_port  = cfg.get("seaweedfs_s3_port", 8333)
+        s3_port  = cfg.get("rustfs_api_port", 9000)
         base_url = f"http://127.0.0.1:{s3_port}"
 
     # Public bucket → unsigned URL
