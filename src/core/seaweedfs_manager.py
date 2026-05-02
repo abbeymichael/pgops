@@ -4,10 +4,20 @@ Manages the SeaweedFS object storage server.
 Mirrors the structure of the former minio_manager.py for consistency.
 
 SeaweedFS architecture used here:
-  - weed server   → combined master + volume + filer + S3 in one process
-  - S3 API        → listens on 127.0.0.1:8333  (replaces MinIO port 9000)
-  - filer HTTP    → listens on 127.0.0.1:8888  (replaces MinIO console port 9001)
-  - master        → listens on 127.0.0.1:9333  (internal, not exposed externally)
+  Four separate processes (avoids Windows Unix-socket gRPC bug in combined mode):
+  - weed master  → listens on 127.0.0.1:9333  (internal, not exposed externally)
+  - weed volume  → listens on 127.0.0.1:8334  (internal)
+  - weed filer   → listens on 127.0.0.1:8888  (replaces MinIO console port 9001)
+  - weed s3      → listens on 127.0.0.1:8333  (replaces MinIO port 9000)
+
+  Why separate processes instead of `weed server` (combined mode)?
+  When all components run inside a single `weed server` process, the embedded
+  volume/filer sub-components try to reach the in-process master over a gRPC
+  Unix domain socket (/tmp/seaweedfs-master-grpc-<port>.sock).  Windows does
+  not support Unix domain sockets in the way SeaweedFS expects, causing a
+  permanent "A socket operation encountered a dead network" failure loop.
+  Running each component as its own process forces all inter-process gRPC
+  communication to go over TCP, which works correctly on Windows.
 
 URL strategy (post-Caddy/mkcert migration):
   - All external-facing URLs use the mkcert-secured Caddy subdomains:
@@ -35,25 +45,25 @@ import time
 import requests
 from pathlib import Path
 
-
 # ── Download URLs ─────────────────────────────────────────────────────────────
 # SeaweedFS releases a single binary that contains both the server and the
 # shell client.  The binary name is just "weed" (or "weed.exe" on Windows).
 SEAWEEDFS_DOWNLOAD = {
     "Windows": "https://github.com/seaweedfs/seaweedfs/releases/latest/download/windows_amd64.tar.gz",
-    "Darwin":  "https://github.com/seaweedfs/seaweedfs/releases/latest/download/darwin_amd64.tar.gz",
+    "Darwin": "https://github.com/seaweedfs/seaweedfs/releases/latest/download/darwin_amd64.tar.gz",
 }
 
 # Bundled asset names (place in assets/ before building)
 SEAWEEDFS_BUNDLED = {
     "Windows": "weed.exe",
-    "Darwin":  "weed",
+    "Darwin": "weed",
 }
 
 
 def _popen_kwargs() -> dict:
     if platform.system() == "Windows":
         import subprocess as sp
+
         return {"creationflags": sp.CREATE_NO_WINDOW}
     return {}
 
@@ -61,6 +71,7 @@ def _popen_kwargs() -> dict:
 def get_seaweedfs_dir() -> Path:
     """Directory where the weed binary lives."""
     from core.pg_manager import get_app_data_dir
+
     d = get_app_data_dir() / "seaweedfs-bin"
     d.mkdir(parents=True, exist_ok=True)
     return d
@@ -68,13 +79,14 @@ def get_seaweedfs_dir() -> Path:
 
 def get_data_dir() -> Path:
     from core.pg_manager import get_app_data_dir
+
     d = get_app_data_dir() / "seaweedfs-data"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
 
 def get_assets_dir() -> Path:
-    if getattr(sys, 'frozen', False):
+    if getattr(sys, "frozen", False):
         return Path(sys._MEIPASS) / "assets"
     return Path(__file__).parent.parent.parent / "assets"
 
@@ -94,14 +106,24 @@ def is_binaries_available() -> bool:
 
 class SeaweedFSManager:
     # Internal ports — SeaweedFS components
-    S3_PORT     = 8333   # S3-compatible API  (replaces MinIO port 9000)
-    FILER_PORT  = 8888   # Filer HTTP UI      (replaces MinIO console port 9001)
-    MASTER_PORT = 9333   # Master server      (internal, not exposed via Caddy)
+    S3_PORT = 8333      # S3-compatible API  (replaces MinIO port 9000)
+    FILER_PORT = 8888   # Filer HTTP UI      (replaces MinIO console port 9001)
+    MASTER_PORT = 9333  # Master server      (internal, not exposed via Caddy)
+
+    # Fixed internal gRPC ports (TCP only — no Unix sockets)
+    _MASTER_GRPC_PORT = 19333
+    _VOLUME_PORT = 8334
+    _VOLUME_GRPC_PORT = 18334
+    _FILER_GRPC_PORT = 18888
 
     def __init__(self, config: dict, log_fn=None):
         self.config = config
-        self._log   = log_fn or print
-        self._proc  = None
+        self._log = log_fn or print
+        # One handle per sub-process (replaces the single self._proc)
+        self._master_proc = None
+        self._volume_proc = None
+        self._filer_proc = None
+        self._s3_proc = None
 
     def log(self, msg: str):
         self._log(msg)
@@ -136,6 +158,10 @@ class SeaweedFSManager:
         """Caddy HTTPS port — used to build the public-facing URLs."""
         return self.config.get("caddy_https_port", 8443)
 
+    @property
+    def _master_addr(self) -> str:
+        return f"127.0.0.1:{self.master_port}"
+
     # ── Binary setup ──────────────────────────────────────────────────────────
 
     def is_binaries_available(self) -> bool:
@@ -147,7 +173,7 @@ class SeaweedFSManager:
         from the SeaweedFS GitHub releases page.
         """
         system = platform.system()
-        dest   = weed_bin()
+        dest = weed_bin()
 
         if dest.exists():
             self.log("SeaweedFS binary already available.")
@@ -182,7 +208,7 @@ class SeaweedFSManager:
 
             resp = requests.get(url, stream=True, timeout=180)
             resp.raise_for_status()
-            total      = int(resp.headers.get("content-length", 0))
+            total = int(resp.headers.get("content-length", 0))
             downloaded = 0
 
             with tempfile.NamedTemporaryFile(delete=False, suffix=".tar.gz") as tf:
@@ -233,9 +259,10 @@ class SeaweedFSManager:
     def _write_s3_config(self):
         """
         Write (or overwrite) the s3_config.json that grants the admin user
-        full access.  SeaweedFS reads this on startup via -s3.config=...
+        full access.  SeaweedFS reads this on startup via -config=...
         """
         import json
+
         config = {
             "identities": [
                 {
@@ -258,7 +285,6 @@ class SeaweedFSManager:
     # ── Server lifecycle ──────────────────────────────────────────────────────
 
     def is_running(self) -> bool:
-        """Check if SeaweedFS S3 API is listening on its internal port."""
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.settimeout(1)
@@ -268,101 +294,207 @@ class SeaweedFSManager:
         except Exception:
             return False
 
+    def _wait_port(self, port: int, timeout: int = 20) -> bool:
+        """Block until the given TCP port accepts connections or timeout."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.settimeout(1)
+                if s.connect_ex(("127.0.0.1", port)) == 0:
+                    s.close()
+                    return True
+                s.close()
+            except Exception:
+                pass
+            time.sleep(0.5)
+        return False
+
     def start(self) -> tuple[bool, str]:
         if self.is_running():
             self.log("SeaweedFS already running.")
             return True, "SeaweedFS already running."
 
-        if not is_binaries_available():
+        if not self.is_binaries_available():
             return False, "SeaweedFS binary not found. Run setup first."
 
-        data_dir   = get_data_dir()
-        s3_cfg     = self._write_s3_config()
+        try:
+            self.stop()
+            time.sleep(1)
+        except Exception:
+            pass
 
-        # weed server launches master + volume + filer + S3 in one process.
-        # Key flags:
-        #   -dir               — where volume data is stored
-        #   -s3                — enable S3 API
-        #   -s3.port           — S3 API port
-        #   -s3.config         — credentials / IAM config file
-        #   -filer             — enable filer
-        #   -filer.port        — filer HTTP port
-        #   -master.port       — master port (internal)
-        #   -volume.port       — volume port (internal, default 8080; shift to
-        #                        avoid collision with landing server)
-        cmd = [
-            str(weed_bin()), "server",
-            "-dir",              str(data_dir),
-            "-master.port",      str(self.master_port),
-            "-volume.port",      "8334",          # internal, not exposed
-            "-filer",
-            "-filer.port",       str(self.filer_port),
-            "-s3",
-            "-s3.port",          str(self.s3_port),
-            "-s3.config",        str(s3_cfg),
-            # Bind everything to loopback only
-            "-ip",               "127.0.0.1",
-        ]
+        data_dir = get_data_dir()
+        raft_dir = data_dir / f"m{self.master_port}"
 
-        # Log file — written next to the data directory so the user can
-        # inspect it when things go wrong (was previously DEVNULL).
-        log_path = get_data_dir().parent / "seaweedfs.log"
+        def _on_rm_error(func, path, exc_info):
+            try:
+                os.chmod(path, os.stat(path).st_mode | 0o200)
+                func(path)
+            except Exception:
+                pass
+
+        if raft_dir.exists():
+            try:
+                shutil.rmtree(raft_dir, onerror=_on_rm_error)
+                time.sleep(0.5)
+            except Exception:
+                pass
+
+        s3_cfg = self._write_s3_config()
+        log_path = data_dir.parent / "seaweedfs.log"
+
         try:
             log_file = open(log_path, "a", encoding="utf-8", errors="replace")
         except Exception:
             log_file = subprocess.DEVNULL
 
-        try:
-            kwargs           = _popen_kwargs()
-            kwargs["stdout"] = log_file
-            kwargs["stderr"] = log_file
-            self._proc       = subprocess.Popen(cmd, **kwargs)
-        except Exception as e:
-            return False, f"Failed to start SeaweedFS: {e}"
+        base_kwargs = _popen_kwargs()
+        base_kwargs["stdout"] = log_file
+        base_kwargs["stderr"] = log_file
+        weed = str(weed_bin())
 
-        for i in range(40):
+        # ── 1. Master ─────────────────────────────────────────────────────
+        # Runs alone so that its gRPC listener binds on TCP before any
+        # other component tries to connect.  Without this separation,
+        # `weed server` uses a Unix domain socket internally which fails
+        # on Windows ("A socket operation encountered a dead network").
+        # -mdir   : meta/raft data directory (not -dir, which is a volume flag)
+        # -peers=none : single-master mode — skips Raft quorum wait for
+        #               instant startup without needing peer addresses.
+        raft_dir.mkdir(parents=True, exist_ok=True)
+        master_cmd = [
+            weed, "master",
+            "-ip", "127.0.0.1",
+            "-ip.bind", "127.0.0.1",
+            "-port", str(self.master_port),
+            "-port.grpc", str(self._MASTER_GRPC_PORT),
+            "-mdir", str(raft_dir),
+            "-peers", "none",
+        ]
+        try:
+            self._master_proc = subprocess.Popen(master_cmd, **base_kwargs)
+        except Exception as e:
+            return False, f"Failed to start SeaweedFS master: {e}"
+
+        if not self._wait_port(self.master_port, timeout=20):
+            self._kill_all()
+            return False, "SeaweedFS master did not start in time."
+        self.log(f"SeaweedFS master up on port {self.master_port}.")
+
+        # ── 2. Volume ─────────────────────────────────────────────────────
+        volume_dir = data_dir / "volume"
+        volume_dir.mkdir(exist_ok=True)
+        volume_cmd = [
+            weed, "volume",
+            "-ip", "127.0.0.1",
+            "-ip.bind", "127.0.0.1",
+            "-port", str(self._VOLUME_PORT),
+            "-port.grpc", str(self._VOLUME_GRPC_PORT),
+            "-dir", str(volume_dir),
+            "-mserver", self._master_addr,
+        ]
+        try:
+            self._volume_proc = subprocess.Popen(volume_cmd, **base_kwargs)
+        except Exception as e:
+            self._kill_all()
+            return False, f"Failed to start SeaweedFS volume: {e}"
+
+        if not self._wait_port(self._VOLUME_PORT, timeout=20):
+            self._kill_all()
+            return False, "SeaweedFS volume did not start in time."
+        self.log(f"SeaweedFS volume up on port {self._VOLUME_PORT}.")
+
+        # ── 3. Filer ──────────────────────────────────────────────────────
+        filer_cmd = [
+            weed, "filer",
+            "-ip", "127.0.0.1",
+            "-ip.bind", "127.0.0.1",
+            "-port", str(self.filer_port),
+            "-port.grpc", str(self._FILER_GRPC_PORT),
+            "-master", self._master_addr,
+        ]
+        try:
+            self._filer_proc = subprocess.Popen(filer_cmd, **base_kwargs)
+        except Exception as e:
+            self._kill_all()
+            return False, f"Failed to start SeaweedFS filer: {e}"
+
+        if not self._wait_port(self.filer_port, timeout=20):
+            self._kill_all()
+            return False, "SeaweedFS filer did not start in time."
+        self.log(f"SeaweedFS filer up on port {self.filer_port}.")
+
+        # ── 4. S3 ─────────────────────────────────────────────────────────
+        s3_cmd = [
+            weed, "s3",
+            "-ip.bind", "127.0.0.1",
+            "-port", str(self.s3_port),
+            "-filer", f"127.0.0.1:{self.filer_port}",
+            "-config", str(s3_cfg),
+        ]
+        try:
+            self._s3_proc = subprocess.Popen(s3_cmd, **base_kwargs)
+        except Exception as e:
+            self._kill_all()
+            return False, f"Failed to start SeaweedFS S3: {e}"
+
+        # Poll until S3 accepts connections
+        for _ in range(40):
             time.sleep(0.5)
             if self.is_running():
                 self.log(f"SeaweedFS started on S3 port {self.s3_port}.")
                 return True, f"SeaweedFS started on S3 port {self.s3_port}."
 
-        # Process already exited — read the tail of the log for a clue
         hint = ""
         try:
             if hasattr(log_file, "name"):
                 with open(log_path, "r", encoding="utf-8", errors="replace") as lf:
                     lines = lf.readlines()
-                    tail  = "".join(lines[-20:]).strip()
+                    tail = "".join(lines[-20:]).strip()
                     if tail:
                         hint = f"\n\nLast log lines:\n{tail}"
         except Exception:
             pass
 
-        return False, f"SeaweedFS did not start in time (log: {log_path}){hint}"
+        self._kill_all()
+        return False, f"SeaweedFS S3 did not start in time (log: {log_path}){hint}"
+
+    def _kill_all(self):
+        """Terminate all sub-processes unconditionally (best-effort)."""
+        for attr in ("_s3_proc", "_filer_proc", "_volume_proc", "_master_proc"):
+            proc = getattr(self, attr, None)
+            if proc:
+                try:
+                    proc.terminate()
+                    proc.wait(timeout=5)
+                except Exception:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+                setattr(self, attr, None)
 
     def stop(self) -> tuple[bool, str]:
         if not self.is_running():
+            # Still attempt to clean up any lingering handles even if the
+            # port check says nothing is listening.
+            self._kill_all()
             return True, "SeaweedFS not running."
 
-        if self._proc:
-            try:
-                self._proc.terminate()
-                self._proc.wait(timeout=5)
-            except Exception:
-                try:
-                    self._proc.kill()
-                except Exception:
-                    pass
-            self._proc = None
+        self._kill_all()
 
+        # If something is still listening (e.g. a process started outside
+        # this manager) fall back to a system-wide kill.
         if self.is_running():
             if platform.system() == "Windows":
                 subprocess.run(
                     ["taskkill", "/F", "/IM", "weed.exe"],
-                    capture_output=True, **_popen_kwargs(),
+                    capture_output=True,
+                    **_popen_kwargs(),
                 )
             else:
-                subprocess.run(["pkill", "-f", "weed server"], capture_output=True)
+                subprocess.run(["pkill", "-f", "weed "], capture_output=True)
 
         self.log("SeaweedFS stopped.")
         return True, "SeaweedFS stopped."
@@ -443,6 +575,7 @@ class SeaweedFSManager:
         Applies an S3 bucket policy that grants s3:GetObject to everyone.
         """
         import json
+
         policy = {
             "Version": "2012-10-17",
             "Statement": [
@@ -494,11 +627,12 @@ class SeaweedFSManager:
             r = self._s3_request("GET", f"/{bucket}", params={"policy": ""})
             if r.status_code == 200:
                 import json as _json
+
                 data = _json.loads(r.text)
                 for stmt in data.get("Statement", []):
-                    if (
-                        stmt.get("Effect") == "Allow"
-                        and stmt.get("Principal") in ("*", {"AWS": "*"})
+                    if stmt.get("Effect") == "Allow" and stmt.get("Principal") in (
+                        "*",
+                        {"AWS": "*"},
                     ):
                         return "public"
             return "private"
@@ -538,7 +672,7 @@ class SeaweedFSManager:
         params = {
             "list-type": "2",
             "delimiter": "/",
-            "max-keys":  "1000",
+            "max-keys": "1000",
         }
         if prefix:
             params["prefix"] = prefix.strip("/") + "/"
@@ -547,6 +681,7 @@ class SeaweedFSManager:
             if r.status_code != 200:
                 return []
             import xml.etree.ElementTree as ET
+
             ns = {"s3": "http://s3.amazonaws.com/doc/2006-03-01/"}
             root = ET.fromstring(r.text)
             folders = []
@@ -555,7 +690,7 @@ class SeaweedFSManager:
                 # strip trailing slash and leading prefix
                 name = p.rstrip("/")
                 if prefix:
-                    name = name[len(prefix.strip("/")) + 1:]
+                    name = name[len(prefix.strip("/")) + 1 :]
                 if name:
                     folders.append(name)
             return folders
@@ -574,8 +709,8 @@ class SeaweedFSManager:
         # List all objects under the prefix
         params = {
             "list-type": "2",
-            "prefix":    folder,
-            "max-keys":  "1000",
+            "prefix": folder,
+            "max-keys": "1000",
         }
         try:
             r = self._s3_request("GET", f"/{bucket}", params=params)
@@ -583,6 +718,7 @@ class SeaweedFSManager:
                 return False, f"Could not list objects: HTTP {r.status_code}"
 
             import xml.etree.ElementTree as ET
+
             ns = {"s3": "http://s3.amazonaws.com/doc/2006-03-01/"}
             root = ET.fromstring(r.text)
             keys = [
@@ -591,12 +727,13 @@ class SeaweedFSManager:
             ]
 
             if not keys:
-                return True, f"Folder '{folder.rstrip('/')}' deleted (was already empty)."
+                return (
+                    True,
+                    f"Folder '{folder.rstrip('/')}' deleted (was already empty).",
+                )
 
             # Build a multi-delete XML body
-            objects_xml = "".join(
-                f"<Object><Key>{k}</Key></Object>" for k in keys if k
-            )
+            objects_xml = "".join(f"<Object><Key>{k}</Key></Object>" for k in keys if k)
             body = (
                 '<?xml version="1.0" encoding="UTF-8"?>'
                 "<Delete>"
@@ -605,6 +742,7 @@ class SeaweedFSManager:
             ).encode("utf-8")
 
             import hashlib, base64
+
             md5 = base64.b64encode(hashlib.md5(body).digest()).decode()
 
             dr = self._s3_request(
@@ -613,8 +751,8 @@ class SeaweedFSManager:
                 params={"delete": ""},
                 data=body,
                 headers={
-                    "Content-Type":  "application/xml",
-                    "Content-MD5":   md5,
+                    "Content-Type": "application/xml",
+                    "Content-MD5": md5,
                     "Content-Length": str(len(body)),
                 },
             )
@@ -629,6 +767,7 @@ class SeaweedFSManager:
     def get_lan_ip(self) -> str:
         try:
             from core.network_info import get_all_interfaces, get_best_ip
+
             ifaces = get_all_interfaces()
             return get_best_ip(ifaces, self.config.get("preferred_ip", ""))
         except Exception:
