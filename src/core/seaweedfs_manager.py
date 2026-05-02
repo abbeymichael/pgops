@@ -304,21 +304,41 @@ class SeaweedFSManager:
             "-ip",               "127.0.0.1",
         ]
 
+        # Log file — written next to the data directory so the user can
+        # inspect it when things go wrong (was previously DEVNULL).
+        log_path = get_data_dir().parent / "seaweedfs.log"
         try:
-            kwargs             = _popen_kwargs()
-            kwargs["stdout"]   = subprocess.DEVNULL
-            kwargs["stderr"]   = subprocess.DEVNULL
-            self._proc         = subprocess.Popen(cmd, **kwargs)
+            log_file = open(log_path, "a", encoding="utf-8", errors="replace")
+        except Exception:
+            log_file = subprocess.DEVNULL
+
+        try:
+            kwargs           = _popen_kwargs()
+            kwargs["stdout"] = log_file
+            kwargs["stderr"] = log_file
+            self._proc       = subprocess.Popen(cmd, **kwargs)
         except Exception as e:
             return False, f"Failed to start SeaweedFS: {e}"
 
-        for _ in range(40):
+        for i in range(40):
             time.sleep(0.5)
             if self.is_running():
                 self.log(f"SeaweedFS started on S3 port {self.s3_port}.")
                 return True, f"SeaweedFS started on S3 port {self.s3_port}."
 
-        return False, "SeaweedFS did not start in time."
+        # Process already exited — read the tail of the log for a clue
+        hint = ""
+        try:
+            if hasattr(log_file, "name"):
+                with open(log_path, "r", encoding="utf-8", errors="replace") as lf:
+                    lines = lf.readlines()
+                    tail  = "".join(lines[-20:]).strip()
+                    if tail:
+                        hint = f"\n\nLast log lines:\n{tail}"
+        except Exception:
+            pass
+
+        return False, f"SeaweedFS did not start in time (log: {log_path}){hint}"
 
     def stop(self) -> tuple[bool, str]:
         if not self.is_running():

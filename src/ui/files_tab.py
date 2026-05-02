@@ -800,6 +800,7 @@ class FilesTab(QWidget):
                 "Click 'Setup SeaweedFS' first to get the SeaweedFS binary.")
             return
         self.btn_start.setEnabled(False)
+        self.btn_stop.setEnabled(False)
         self._log_status("Starting SeaweedFS...")
 
         def fn(_prog):
@@ -807,21 +808,36 @@ class FilesTab(QWidget):
 
         def done(ok, msg):
             self.btn_start.setEnabled(True)
+            self.btn_stop.setEnabled(True)
             self._update_status()
             if ok:
                 self.refresh_buckets()
+            else:
+                # Surface the error — was previously swallowed silently
+                self._log_status(f"Failed to start: {msg}")
+                QMessageBox.critical(
+                    self, "SeaweedFS Failed to Start",
+                    f"{msg}\n\nCheck the log file at:\n"
+                    "  <AppData>/seaweedfs.log"
+                )
 
         self._run(fn, done)
 
     def _stop(self):
         self.btn_stop.setEnabled(False)
+        self.btn_start.setEnabled(False)
+        self._log_status("Stopping SeaweedFS...")
 
         def fn(_prog):
             return self.minio.stop()
 
         def done(ok, msg):
             self.btn_stop.setEnabled(True)
+            self.btn_start.setEnabled(True)
             self._update_status()
+            if not ok:
+                self._log_status(f"Stop error: {msg}")
+                QMessageBox.warning(self, "SeaweedFS Stop Warning", msg)
 
         self._run(fn, done)
 
@@ -846,9 +862,49 @@ class FilesTab(QWidget):
         w.progress.connect(self.prog.setValue)
 
     def _open_console(self):
-        """Open the SeaweedFS Filer UI via the mkcert-secured Caddy URL."""
+        """
+        Open the SeaweedFS Filer UI.
+        Prefers the mkcert-secured Caddy URL (https://filer.pgops.local).
+        Falls back to the raw internal filer URL if Caddy is not detected,
+        so the button always does something useful even without TLS.
+        """
         import webbrowser
-        webbrowser.open(self.minio.console_url())
+        import socket
+
+        if not self.minio.is_running():
+            QMessageBox.information(
+                self, "Storage Not Running",
+                "Start the SeaweedFS storage server first, then open the Filer UI."
+            )
+            return
+
+        # Try to reach the Caddy HTTPS port — if it's listening, use the
+        # pretty Caddy URL; otherwise fall back to the raw internal filer port.
+        caddy_port = self.minio.https_port
+        caddy_up = False
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(1)
+            caddy_up = s.connect_ex(("127.0.0.1", caddy_port)) == 0
+            s.close()
+        except Exception:
+            caddy_up = False
+
+        if caddy_up:
+            url = self.minio.console_url()   # https://filer.pgops.local:…
+        else:
+            # Caddy is not running — open the raw filer HTTP UI directly
+            filer_port = self.minio.filer_port
+            url = f"http://127.0.0.1:{filer_port}"
+            QMessageBox.information(
+                self, "Caddy Not Running",
+                f"Caddy reverse-proxy is not running, so the mkcert-secured URL\n"
+                f"(https://filer.pgops.local) is unavailable.\n\n"
+                f"Opening the raw internal Filer UI instead:\n{url}\n\n"
+                f"Start Caddy from the Server tab to use the HTTPS URL."
+            )
+
+        webbrowser.open(url)
 
     # ── Bucket operations ─────────────────────────────────────────────────────
 

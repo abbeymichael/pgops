@@ -293,6 +293,9 @@ class MainWindow(QMainWindow):
             on_stop_frankenphp=self._stop_all_apps,
             caddy_manager=self.caddy,
             frankenphp_manager=self.app_procs,
+            on_setup_seaweedfs=self._setup_seaweedfs,
+            on_start_seaweedfs=self._start_seaweedfs,
+            on_stop_seaweedfs=self._stop_seaweedfs,
             log_fn=self._log,
         )
         self._add_page("server", self._srv_tab)
@@ -573,6 +576,64 @@ class MainWindow(QMainWindow):
             self._log("Setup complete. Click Start Server.")
         else:
             self._log(f"Setup failed: {msg}")
+
+    # ── SeaweedFS ─────────────────────────────────────────────────────────────
+
+    def _setup_seaweedfs(self):
+        self._srv_tab.btn_swfs_setup.setEnabled(False)
+        self._srv_tab.set_swfs_progress(True, 0)
+
+        def fn(pc):
+            return self.minio.setup_binaries(progress_callback=pc)
+
+        def done(ok, msg):
+            self._srv_tab.set_swfs_progress(False)
+            self._srv_tab.btn_swfs_setup.setEnabled(True)
+            self._log(f"[SeaweedFS] {msg}")
+            self._poll()
+
+        w = self._run(fn, done)
+        w.progress.connect(lambda v: self._srv_tab.set_swfs_progress(True, v))
+
+    def _start_seaweedfs(self):
+        if not self.minio.is_binaries_available():
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.information(
+                self, "Setup Required",
+                "Click \"Setup\" in the SeaweedFS card first to download the binary.",
+            )
+            return
+        self._srv_tab.btn_swfs_start.setEnabled(False)
+
+        def fn(_p):
+            return self.minio.start()
+
+        def done(ok, msg):
+            self._srv_tab.btn_swfs_start.setEnabled(True)
+            self._log(f"[SeaweedFS] {msg}")
+            if not ok:
+                from PyQt6.QtWidgets import QMessageBox
+                QMessageBox.critical(
+                    self, "SeaweedFS Failed to Start",
+                    f"{msg}\n\nCheck the log file at:\n"
+                    "  <AppData>/seaweedfs.log",
+                )
+            self._poll()
+
+        self._run(fn, done)
+
+    def _stop_seaweedfs(self):
+        self._srv_tab.btn_swfs_stop.setEnabled(False)
+
+        def fn(_p):
+            return self.minio.stop()
+
+        def done(ok, msg):
+            self._srv_tab.btn_swfs_stop.setEnabled(True)
+            self._log(f"[SeaweedFS] {msg}")
+            self._poll()
+
+        self._run(fn, done)
 
     # ── Caddy ────────────────────────────────────────────────────────────────
 
@@ -989,6 +1050,11 @@ class MainWindow(QMainWindow):
             self._srv_tab.show_warn(True)
 
         self._update_pgadmin_status()
+
+        self._srv_tab.update_seaweedfs_status(
+            running=self.minio.is_running(),
+            available=self.minio.is_binaries_available(),
+        )
 
         self._srv_tab.update_caddy_status(
             running=self.caddy.is_running(),
