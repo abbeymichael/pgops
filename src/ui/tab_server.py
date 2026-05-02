@@ -32,7 +32,9 @@ class ServerTab(QWidget):
         on_setup_caddy, on_start_caddy, on_stop_caddy,
         on_setup_frankenphp, on_start_frankenphp, on_stop_frankenphp,
         caddy_manager, frankenphp_manager,
-        log_fn, parent=None,
+        # SeaweedFS callbacks
+        on_setup_seaweedfs=None, on_start_seaweedfs=None, on_stop_seaweedfs=None,
+        log_fn=None, parent=None,
     ):
         super().__init__(parent)
         self._manager    = manager
@@ -41,7 +43,7 @@ class ServerTab(QWidget):
         self._pgadmin    = pgadmin
         self._caddy      = caddy_manager
         self._frankenphp = frankenphp_manager
-        self._log        = log_fn
+        self._log        = log_fn or print
 
         # Callbacks
         self._cb_start         = on_start
@@ -57,6 +59,9 @@ class ServerTab(QWidget):
         self._cb_fphp_setup    = on_setup_frankenphp
         self._cb_fphp_start    = on_start_frankenphp
         self._cb_fphp_stop     = on_stop_frankenphp
+        self._cb_swfs_setup    = on_setup_seaweedfs or (lambda: None)
+        self._cb_swfs_start    = on_start_seaweedfs or (lambda: None)
+        self._cb_swfs_stop     = on_stop_seaweedfs  or (lambda: None)
 
         self._build()
 
@@ -109,13 +114,16 @@ class ServerTab(QWidget):
         row2.addWidget(self._logs_card(), 5)
         bv.addLayout(row2)
 
-        # Row 3 – pgAdmin
+        # Row 3 – SeaweedFS object storage
+        bv.addWidget(self._seaweedfs_card())
+
+        # Row 4 – pgAdmin
         bv.addWidget(self._pgadmin_card())
 
-        # Row 4 – Caddy
+        # Row 5 – Caddy
         bv.addWidget(self._caddy_card())
 
-        # Row 5 – FrankenPHP
+        # Row 6 – FrankenPHP
         bv.addWidget(self._frankenphp_card())
 
         scroll.setWidget(body)
@@ -413,6 +421,153 @@ class ServerTab(QWidget):
         return card
 
     # ── pgAdmin card ──────────────────────────────────────────────────────────
+
+    def _seaweedfs_card(self):
+        """Service card for SeaweedFS object storage (replaces MinIO)."""
+        card = _card()
+        v = QVBoxLayout(card)
+        v.setContentsMargins(22, 18, 22, 18)
+        v.setSpacing(12)
+
+        # Header row
+        hdr = QHBoxLayout()
+        t = QLabel("SeaweedFS — Object Storage (S3-compatible)")
+        t.setStyleSheet(
+            f"color:{C_TEXT};font-size:14px;font-weight:700;background:transparent;"
+        )
+        self._swfs_badge = QLabel("● STOPPED")
+        self._swfs_badge.setStyleSheet(
+            f"color:{C_RED};background:#2a0d0d;border:1px solid {C_RED}40;"
+            f"border-radius:4px;font-size:10px;font-weight:800;"
+            f"letter-spacing:1px;padding:3px 10px;"
+        )
+        hdr.addWidget(t)
+        hdr.addStretch()
+        hdr.addWidget(self._swfs_badge)
+        v.addLayout(hdr)
+
+        # URL / port info row
+        info = QHBoxLayout()
+        s3_lbl = QLabel("S3 API")
+        s3_lbl.setStyleSheet(f"color:{C_TEXT3};font-size:11px;background:transparent;")
+        self._swfs_s3_url = QLabel(self._swfs_url_text())
+        self._swfs_s3_url.setStyleSheet(
+            f"color:{C_BLUE};font-family:'Consolas','Courier New',monospace;"
+            f"font-size:12px;background:transparent;"
+        )
+        info.addWidget(s3_lbl)
+        info.addSpacing(8)
+        info.addWidget(self._swfs_s3_url)
+        info.addStretch()
+        v.addLayout(info)
+
+        # Note about Caddy
+        proxy_note = QLabel(
+            "ⓘ  S3 API and Filer UI are proxied via Caddy. "
+            "Manage buckets from the Storage tab. "
+            "Log: <AppData>/seaweedfs.log"
+        )
+        proxy_note.setWordWrap(True)
+        proxy_note.setStyleSheet(
+            f"color:{C_TEXT3};font-size:11px;background:transparent;"
+        )
+        v.addWidget(proxy_note)
+
+        # Progress bar for setup
+        self._swfs_prog = QProgressBar()
+        self._swfs_prog.setVisible(False)
+        self._swfs_prog.setFixedHeight(3)
+        self._swfs_prog.setTextVisible(False)
+        self._swfs_prog.setStyleSheet(
+            f"QProgressBar{{background:{C_BORDER};border:none;}}"
+            f"QProgressBar::chunk{{background:{C_AMBER};}}"
+        )
+        v.addWidget(self._swfs_prog)
+
+        # Buttons
+        btns = QHBoxLayout()
+        btns.setSpacing(8)
+
+        def _mk(text, bg, hover, fg="white"):
+            b = QPushButton(text)
+            b.setFixedHeight(32)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setStyleSheet(
+                f"QPushButton{{background:{bg};color:{fg};border:none;"
+                f"border-radius:6px;font-size:12px;font-weight:600;padding:0 14px;}}"
+                f"QPushButton:hover{{background:{hover};}}"
+                f"QPushButton:disabled{{background:{C_BORDER};color:{C_TEXT3};}}"
+            )
+            return b
+
+        self.btn_swfs_setup  = _mk("⚙ Setup",        "#78350f", "#92400e", "#fef3c7")
+        self.btn_swfs_start  = _mk("▶ Start Storage", "#166534", "#15803d", "#86efac")
+        self.btn_swfs_stop   = _mk("■ Stop",          "#7f1d1d", "#991b1b", "#fca5a5")
+
+        self.btn_swfs_setup.clicked.connect(self._cb_swfs_setup)
+        self.btn_swfs_start.clicked.connect(self._cb_swfs_start)
+        self.btn_swfs_stop.clicked.connect(self._cb_swfs_stop)
+
+        for b in (self.btn_swfs_setup, self.btn_swfs_start, self.btn_swfs_stop):
+            btns.addWidget(b)
+        btns.addStretch()
+        v.addLayout(btns)
+
+        return card
+
+    def _swfs_url_text(self) -> str:
+        """Build the S3 / Filer URL display string from the live SeaweedFS config."""
+        try:
+            s3_port    = self._seaweedfs.s3_port
+            filer_port = self._seaweedfs.filer_port
+            https_port = self._seaweedfs.https_port
+            if https_port == 443:
+                return (
+                    f"https://s3.pgops.local  "
+                    f"·  Filer: https://filer.pgops.local  "
+                    f"·  Internal: 127.0.0.1:{s3_port}"
+                )
+            return (
+                f"https://s3.pgops.local:{https_port}  "
+                f"·  Filer: https://filer.pgops.local:{https_port}  "
+                f"·  Internal: 127.0.0.1:{s3_port}"
+            )
+        except Exception:
+            return "127.0.0.1:8333 (S3)  ·  127.0.0.1:8888 (Filer)"
+
+    def update_seaweedfs_status(self, running: bool, available: bool):
+        """Called from the main_window poll loop to keep the card in sync."""
+        self._swfs_s3_url.setText(self._swfs_url_text())
+
+        if not available:
+            self._swfs_badge.setText("NOT INSTALLED")
+            self._swfs_badge.setStyleSheet(
+                f"color:{C_TEXT3};background:{C_SURFACE2};border:1px solid {C_BORDER};"
+                f"border-radius:4px;font-size:10px;font-weight:800;"
+                f"letter-spacing:1px;padding:3px 10px;"
+            )
+            self.btn_swfs_setup.setVisible(True)
+        elif running:
+            self._swfs_badge.setText("● RUNNING")
+            self._swfs_badge.setStyleSheet(
+                f"color:{C_GREEN};background:#0a2016;border:1px solid {C_GREEN}40;"
+                f"border-radius:4px;font-size:10px;font-weight:800;"
+                f"letter-spacing:1px;padding:3px 10px;"
+            )
+            self.btn_swfs_setup.setVisible(False)
+        else:
+            self._swfs_badge.setText("● STOPPED")
+            self._swfs_badge.setStyleSheet(
+                f"color:{C_RED};background:#2a0d0d;border:1px solid {C_RED}40;"
+                f"border-radius:4px;font-size:10px;font-weight:800;"
+                f"letter-spacing:1px;padding:3px 10px;"
+            )
+            self.btn_swfs_setup.setVisible(not available)
+
+    def set_swfs_progress(self, visible: bool, val: int = 0):
+        self._swfs_prog.setVisible(visible)
+        if visible:
+            self._swfs_prog.setValue(val)
 
     def _pgadmin_card(self):
         card = _card()
