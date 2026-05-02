@@ -27,6 +27,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt6.QtGui import QColor, QIcon, QPixmap, QAction
 
+from core import seaweedfs_manager
 from core.pg_manager import PostgresManager, BASE_DIR, DATA_DIR, LOG_FILE, _bin
 from core.config import load_config, save_config
 from core.pg_manager import get_app_data_dir
@@ -34,7 +35,7 @@ from core.mdns import MDNSBroadcaster, verify_mdns_resolution
 from core.scheduler import BackupScheduler
 from core.service_manager import service_exists
 import core.db_manager as dbm
-from core.minio_manager import MinIOManager
+from core.seaweedfs_manager import SeaweedFSManager
 from core.pgadmin_manager import PgAdminManager
 
 # Phase 2
@@ -137,7 +138,7 @@ class MainWindow(QMainWindow):
         )
         # Legacy mdns broadcaster (pgops.local via _postgresql._tcp)
         self.mdns = MDNSBroadcaster(port=self.config["port"], log_fn=self._log)
-        self.minio = MinIOManager(self.config, log_fn=self._log)
+        self.minio = SeaweedFSManager(self.config, log_fn=self._log)
         self.pgadmin = PgAdminManager(self.config, log_fn=self._log)
 
         # Phase 2 — mDNS server for .local LAN discovery
@@ -155,8 +156,8 @@ class MainWindow(QMainWindow):
         self.api_server = APIServer(
             app_registry_fn=load_apps,
             process_manager=self.app_procs,
+            seaweedfs_manager=self.minio,
             postgres_manager=self.manager,
-            minio_manager=self.minio,
             caddy_manager=self.caddy,
             admin_config=self.config,
             log_fn=self._log,
@@ -196,9 +197,9 @@ class MainWindow(QMainWindow):
         self._log(msg)
 
         # Register the fixed infrastructure subdomains so LAN devices can
-        # resolve minio.pgops.local, console.pgops.local, pgadmin.pgops.local
+        # resolve s3.pgops.local, filer.pgops.local, pgadmin.pgops.local
         # in addition to app-specific subdomains.
-        for hostname in ("minio.pgops", "console.pgops", "pgadmin.pgops"):
+        for hostname in ("s3.pgops", "filer.pgops", "pgadmin.pgops"):
             self.mdns_server.register_app("", domain=f"{hostname}.local")
 
         # Register any already-deployed apps
@@ -275,7 +276,7 @@ class MainWindow(QMainWindow):
         self._srv_tab = ServerTab(
             manager=self.manager,
             config=self.config,
-            minio=self.minio,
+            seaweedfs=self.minio,
             pgadmin=self.pgadmin,
             on_start=self._start,
             on_stop=self._stop,
@@ -515,7 +516,7 @@ class MainWindow(QMainWindow):
                 def _sm(_p):
                     return self.minio.start()
 
-                self._run(_sm, lambda ok, msg: self._log(f"[MinIO] {msg}"))
+                self._run(_sm, lambda ok, msg: self._log(f"[SeaweedFS] {msg}"))
             if not self.pgadmin.is_running() and self.pgadmin.is_available():
 
                 def _spa(_p):

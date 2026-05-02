@@ -39,9 +39,13 @@ DEFAULT_CONFIG = {
     # Internal landing-page server (Caddy proxies pgops.local → here)
     "landing_port": 8080,
 
-    # MinIO ports (direct binary, Caddy proxies subdomains to these)
-    "minio_api_port":     9000,
-    "minio_console_port": 9001,
+    # SeaweedFS ports (direct binary, Caddy proxies subdomains to these)
+    # S3 API port  — replaces former minio_api_port     (was 9000)
+    # Filer port   — replaces former minio_console_port  (was 9001)
+    # Master port  — internal only, never proxied by Caddy
+    "seaweedfs_s3_port":     8333,
+    "seaweedfs_filer_port":  8888,
+    "seaweedfs_master_port": 9333,
 
     # pgAdmin port (when running)
     "pgadmin_port": 5050,
