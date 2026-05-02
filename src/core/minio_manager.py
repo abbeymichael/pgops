@@ -2,13 +2,23 @@
 minio_manager.py
 Manages the MinIO object storage server.
 Mirrors the structure of pg_manager.py for consistency.
+
+URL strategy (post-Caddy/mkcert migration):
+  - All external-facing URLs use the mkcert-secured Caddy subdomains:
+      API endpoint  → https://minio.pgops.local:<https_port>
+      Web console   → https://console.pgops.local:<https_port>
+  - MinIO itself still listens on plain HTTP internally (127.0.0.1:9000).
+    Caddy terminates TLS and reverse-proxies to it.
+  - Laravel .env must use the HTTPS Caddy URL as AWS_ENDPOINT so that
+    apps on the LAN can reach storage without certificate warnings.
+  - The raw internal URL (http://127.0.0.1:9000) is only used for mc
+    alias registration and internal health checks.
 """
 
 import os
 import sys
 import subprocess
 import platform
-import zipfile
 import shutil
 import socket
 import time
@@ -89,18 +99,19 @@ def is_mc_available() -> bool:
 
 
 class MinIOManager:
-    # Default admin credentials — same as PostgreSQL admin for simplicity
-    ALIAS = "pgops"
-    API_PORT   = 9000
+    ALIAS        = "pgops"
+    API_PORT     = 9000
     CONSOLE_PORT = 9001
 
     def __init__(self, config: dict, log_fn=None):
-        self.config  = config
-        self._log    = log_fn or print
-        self._proc   = None
+        self.config = config
+        self._log   = log_fn or print
+        self._proc  = None
 
     def log(self, msg: str):
         self._log(msg)
+
+    # ── Config properties ─────────────────────────────────────────────────────
 
     @property
     def admin_user(self) -> str:
@@ -117,6 +128,11 @@ class MinIOManager:
     @property
     def console_port(self) -> int:
         return self.config.get("minio_console_port", self.CONSOLE_PORT)
+
+    @property
+    def https_port(self) -> int:
+        """Caddy HTTPS port — used to build the public-facing URLs."""
+        return self.config.get("caddy_https_port", 8443)
 
     # ── Binary setup ──────────────────────────────────────────────────────────
 
@@ -136,7 +152,7 @@ class MinIOManager:
             "minio",
             MINIO_BUNDLED.get(system, ""),
             MINIO_DOWNLOAD.get(system, ""),
-            progress_callback=lambda p: progress_callback(p // 2) if progress_callback else None
+            progress_callback=lambda p: progress_callback(p // 2) if progress_callback else None,
         )
         if not ok1:
             return False, msg1
@@ -145,7 +161,7 @@ class MinIOManager:
             "mc",
             MC_BUNDLED.get(system, ""),
             MINIO_CLIENT_DOWNLOAD.get(system, ""),
-            progress_callback=lambda p: progress_callback(50 + p // 2) if progress_callback else None
+            progress_callback=lambda p: progress_callback(50 + p // 2) if progress_callback else None,
         )
         if not ok2:
             return False, msg2
@@ -161,8 +177,7 @@ class MinIOManager:
             self.log(f"{name} already available.")
             return True, f"{name} ready."
 
-        # Try bundled assets first
-        assets = get_assets_dir()
+        assets  = get_assets_dir()
         bundled = assets / bundled_name if bundled_name else None
         if bundled and bundled.exists():
             self.log(f"Extracting bundled {name}...")
@@ -173,14 +188,13 @@ class MinIOManager:
                 progress_callback(100)
             return True, f"{name} extracted from bundle."
 
-        # Download
         if not url:
             return False, f"No download URL for {name} on {platform.system()}."
         self.log(f"Downloading {name}...")
         try:
             resp = requests.get(url, stream=True, timeout=120)
             resp.raise_for_status()
-            total = int(resp.headers.get("content-length", 0))
+            total      = int(resp.headers.get("content-length", 0))
             downloaded = 0
             with open(dest, "wb") as f:
                 for chunk in resp.iter_content(chunk_size=65536):
@@ -197,7 +211,7 @@ class MinIOManager:
     # ── Server lifecycle ──────────────────────────────────────────────────────
 
     def is_running(self) -> bool:
-        """Check if MinIO is listening on its API port."""
+        """Check if MinIO is listening on its internal API port."""
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.settimeout(1)
@@ -226,20 +240,19 @@ class MinIOManager:
             str(minio_bin()),
             "server",
             str(data_dir),
-            "--address",  f"0.0.0.0:{self.api_port}",
-            "--console-address", f"0.0.0.0:{self.console_port}",
+            "--address",         f"127.0.0.1:{self.api_port}",
+            "--console-address", f"127.0.0.1:{self.console_port}",
         ]
 
         try:
             kwargs = _popen_kwargs()
-            kwargs["env"] = env
+            kwargs["env"]    = env
             kwargs["stdout"] = subprocess.DEVNULL
             kwargs["stderr"] = subprocess.DEVNULL
             self._proc = subprocess.Popen(cmd, **kwargs)
         except Exception as e:
             return False, f"Failed to start MinIO: {e}"
 
-        # Wait up to 10s for it to become available
         for _ in range(20):
             time.sleep(0.5)
             if self.is_running():
@@ -253,15 +266,13 @@ class MinIOManager:
         if not self.is_running():
             return True, "MinIO not running."
 
-        # Try graceful shutdown via mc first
         if is_mc_available():
             subprocess.run(
                 [str(mc_bin()), "admin", "service", "stop", self.ALIAS],
-                capture_output=True, **_popen_kwargs()
+                capture_output=True, **_popen_kwargs(),
             )
             time.sleep(2)
 
-        # Kill process if still running
         if self._proc:
             try:
                 self._proc.terminate()
@@ -273,16 +284,14 @@ class MinIOManager:
                     pass
             self._proc = None
 
-        # Platform kill as last resort
         if self.is_running():
             if platform.system() == "Windows":
                 subprocess.run(
                     ["taskkill", "/F", "/IM", "minio.exe"],
-                    capture_output=True, **_popen_kwargs()
+                    capture_output=True, **_popen_kwargs(),
                 )
             else:
-                subprocess.run(["pkill", "-f", "minio server"],
-                               capture_output=True)
+                subprocess.run(["pkill", "-f", "minio server"], capture_output=True)
 
         self.log("MinIO stopped.")
         return True, "MinIO stopped."
@@ -290,7 +299,10 @@ class MinIOManager:
     # ── mc alias ─────────────────────────────────────────────────────────────
 
     def _configure_mc_alias(self):
-        """Register pgops alias in mc so bucket_manager can use it."""
+        """
+        Register the pgops alias in mc using the internal plaintext URL.
+        mc talks directly to MinIO on localhost — it does NOT go through Caddy.
+        """
         if not is_mc_available():
             return
         subprocess.run([
@@ -304,7 +316,189 @@ class MinIOManager:
         """Call this before any mc operations."""
         self._configure_mc_alias()
 
-    # ── Connection info ───────────────────────────────────────────────────────
+    # ── URL helpers ───────────────────────────────────────────────────────────
+    #
+    # Rule: anything shown to the user or written into .env files uses the
+    # HTTPS Caddy subdomain. The raw internal URL is only used by mc and for
+    # health checks inside this process.
+
+    def _caddy_base(self, subdomain: str) -> str:
+        """Return https://<subdomain>:<https_port> (omit port if 443)."""
+        port = self.https_port
+        if port == 443:
+            return f"https://{subdomain}"
+        return f"https://{subdomain}:{port}"
+
+    def api_url(self) -> str:
+        """
+        Public HTTPS URL for the MinIO S3 API — use this in .env files.
+        Goes through Caddy → mkcert TLS.
+        """
+        return self._caddy_base("minio.pgops.local")
+
+    def console_url(self) -> str:
+        """
+        Public HTTPS URL for the MinIO web console — use this to open the browser.
+        Goes through Caddy → mkcert TLS.
+        """
+        return self._caddy_base("console.pgops.local")
+
+    def internal_api_url(self) -> str:
+        """Raw internal URL used only by mc and health checks."""
+        return f"http://127.0.0.1:{self.api_port}"
+
+    # Keep old name for any callers that used endpoint_url()
+    def endpoint_url(self, use_local: bool = False) -> str:
+        """
+        Backwards-compatible wrapper.
+        Always returns the public HTTPS Caddy URL now.
+        `use_local` is ignored — internal callers should use internal_api_url().
+        """
+        return self.api_url()
+
+    # ── Bucket policy helpers ─────────────────────────────────────────────────
+
+    def set_bucket_public(self, bucket: str) -> tuple[bool, str]:
+        """
+        Make a bucket publicly readable (anonymous GET/download allowed).
+        Sets the 'download' canned policy via mc.
+        """
+        if not is_mc_available():
+            return False, "mc binary not available."
+        self.ensure_mc_alias()
+        r = subprocess.run(
+            [str(mc_bin()), "anonymous", "set", "download",
+             f"{self.ALIAS}/{bucket}"],
+            capture_output=True, text=True, **_popen_kwargs(),
+        )
+        if r.returncode == 0:
+            return True, f"Bucket '{bucket}' is now public (read-only)."
+        return False, r.stderr.strip() or r.stdout.strip()
+
+    def set_bucket_private(self, bucket: str) -> tuple[bool, str]:
+        """
+        Make a bucket private (no anonymous access).
+        Sets the 'none' canned policy via mc.
+        """
+        if not is_mc_available():
+            return False, "mc binary not available."
+        self.ensure_mc_alias()
+        r = subprocess.run(
+            [str(mc_bin()), "anonymous", "set", "none",
+             f"{self.ALIAS}/{bucket}"],
+            capture_output=True, text=True, **_popen_kwargs(),
+        )
+        if r.returncode == 0:
+            return True, f"Bucket '{bucket}' is now private."
+        return False, r.stderr.strip() or r.stdout.strip()
+
+    def get_bucket_policy(self, bucket: str) -> str:
+        """
+        Return 'public' or 'private'.
+        Uses `mc anonymous get` — returns 'none' for private buckets,
+        'download' for publicly readable ones.
+        """
+        if not is_mc_available():
+            return "unknown"
+        self.ensure_mc_alias()
+        r = subprocess.run(
+            [str(mc_bin()), "anonymous", "get", f"{self.ALIAS}/{bucket}"],
+            capture_output=True, text=True, **_popen_kwargs(),
+        )
+        out = (r.stdout + r.stderr).lower()
+        if "download" in out or "public" in out:
+            return "public"
+        return "private"
+
+    # ── Folder (prefix) helpers ───────────────────────────────────────────────
+    #
+    # S3/MinIO has no real folders — a "folder" is a key prefix ending in '/'.
+    # We create one by uploading a zero-byte placeholder object: prefix/.keep
+
+    def create_folder(self, bucket: str, folder: str) -> tuple[bool, str]:
+        """
+        Create a folder (prefix) inside a bucket by uploading a .keep placeholder.
+        `folder` should NOT have a leading slash.  Trailing slash is added here.
+        """
+        if not is_mc_available():
+            return False, "mc binary not available."
+        self.ensure_mc_alias()
+
+        folder = folder.strip("/")
+        if not folder:
+            return False, "Folder name cannot be empty."
+
+        import tempfile, os as _os
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".keep") as tf:
+            tf.write(b"")
+            tmp = tf.name
+
+        target = f"{self.ALIAS}/{bucket}/{folder}/.keep"
+        try:
+            r = subprocess.run(
+                [str(mc_bin()), "cp", tmp, target],
+                capture_output=True, text=True, **_popen_kwargs(),
+            )
+            _os.unlink(tmp)
+            if r.returncode == 0:
+                return True, f"Folder '{folder}' created in '{bucket}'."
+            return False, r.stderr.strip() or r.stdout.strip()
+        except Exception as exc:
+            try:
+                _os.unlink(tmp)
+            except Exception:
+                pass
+            return False, str(exc)
+
+    def list_folders(self, bucket: str, prefix: str = "") -> list[str]:
+        """
+        List the immediate sub-folders (common prefixes) inside a bucket/prefix.
+        Returns a list of folder names (without trailing slash).
+        """
+        if not is_mc_available():
+            return []
+        self.ensure_mc_alias()
+
+        path = f"{self.ALIAS}/{bucket}"
+        if prefix:
+            path += f"/{prefix.strip('/')}/"
+
+        r = subprocess.run(
+            [str(mc_bin()), "ls", "--recursive=false", path],
+            capture_output=True, text=True, **_popen_kwargs(),
+        )
+        folders = []
+        for line in r.stdout.splitlines():
+            # mc ls output: `[date] [time]     0 folder/`
+            parts = line.strip().split()
+            if parts and parts[-1].endswith("/"):
+                name = parts[-1].rstrip("/")
+                if name and name != ".":
+                    folders.append(name)
+        return folders
+
+    def delete_folder(self, bucket: str, folder: str) -> tuple[bool, str]:
+        """
+        Recursively delete a folder (prefix) and all objects under it.
+        """
+        if not is_mc_available():
+            return False, "mc binary not available."
+        self.ensure_mc_alias()
+
+        folder = folder.strip("/")
+        if not folder:
+            return False, "Folder name cannot be empty."
+
+        r = subprocess.run(
+            [str(mc_bin()), "rm", "--recursive", "--force",
+             f"{self.ALIAS}/{bucket}/{folder}/"],
+            capture_output=True, text=True, **_popen_kwargs(),
+        )
+        if r.returncode == 0:
+            return True, f"Folder '{folder}' deleted from '{bucket}'."
+        return False, r.stderr.strip() or r.stdout.strip()
+
+    # ── Connection info (legacy) ──────────────────────────────────────────────
 
     def get_lan_ip(self) -> str:
         try:
@@ -320,12 +514,3 @@ class MinIOManager:
                 return ip
             except Exception:
                 return "127.0.0.1"
-
-    def endpoint_url(self, use_local: bool = False) -> str:
-        host = "127.0.0.1" if use_local else self.get_lan_ip()
-        return f"http://{host}:{self.api_port}"
-
-    def console_url(self) -> str:
-        # Always use IP — browsers enforce HTTPS on .local via HSTS which breaks plain HTTP
-        ip = self.get_lan_ip()
-        return f"http://{ip}:{self.console_port}"

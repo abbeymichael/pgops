@@ -15,6 +15,8 @@ from ui.theme import (
 )
 
 
+# ── Helpers ────────────────────────────────────────────────────────────────────
+
 def _btn(text, bg=C_BLUE, hover="#3b7de8", fg="white", h=36):
     b = QPushButton(text)
     b.setFixedHeight(h)
@@ -50,6 +52,8 @@ def _lbl(text, color=C_TEXT2, size=12):
     return l
 
 
+# ── Worker ─────────────────────────────────────────────────────────────────────
+
 class _Worker(QThread):
     result = pyqtSignal(object, str)
 
@@ -64,6 +68,8 @@ class _Worker(QThread):
             self.result.emit(None, str(e))
 
 
+# ── Dialogs ────────────────────────────────────────────────────────────────────
+
 class CreateDbDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -74,6 +80,7 @@ class CreateDbDialog(QDialog):
         v.setContentsMargins(24, 24, 24, 24)
         v.setSpacing(12)
 
+        QLabel("New Database").setParent(None)
         title = QLabel("New Database")
         title.setStyleSheet(f"color:{C_TEXT};font-size:16px;font-weight:700;background:transparent;")
         v.addWidget(title)
@@ -117,18 +124,21 @@ class CreateDbDialog(QDialog):
         v.addWidget(btns)
 
     def _validate(self):
-        name = self.db_name.text().strip()
+        name  = self.db_name.text().strip()
         owner = self.owner.text().strip()
-        pw = self.password.text()
+        pw    = self.password.text()
         if not name or not owner or not pw:
             self.error_lbl.setText("All fields required.")
-            self.error_lbl.setVisible(True); return
+            self.error_lbl.setVisible(True)
+            return
         if pw != self.confirm.text():
             self.error_lbl.setText("Passwords do not match.")
-            self.error_lbl.setVisible(True); return
+            self.error_lbl.setVisible(True)
+            return
         if " " in name or " " in owner:
             self.error_lbl.setText("No spaces allowed.")
-            self.error_lbl.setVisible(True); return
+            self.error_lbl.setVisible(True)
+            return
         self.accept()
 
     def values(self):
@@ -145,7 +155,7 @@ class ChangePwDialog(QDialog):
         v.setContentsMargins(24, 24, 24, 24)
         v.setSpacing(10)
 
-        title = QLabel(f"Change Password")
+        title = QLabel("Change Password")
         title.setStyleSheet(f"color:{C_TEXT};font-size:16px;font-weight:700;background:transparent;")
         v.addWidget(title)
         sub = QLabel(f"Set a new password for the role: {role}")
@@ -183,98 +193,88 @@ class ChangePwDialog(QDialog):
 
     def _validate(self):
         if not self.pw.text():
-            self.err.setText("Empty."); self.err.setVisible(True); return
+            self.err.setText("Empty.")
+            self.err.setVisible(True)
+            return
         if self.pw.text() != self.cf.text():
-            self.err.setText("Passwords do not match."); self.err.setVisible(True); return
+            self.err.setText("Passwords do not match.")
+            self.err.setVisible(True)
+            return
         self.accept()
 
     def value(self):
         return self.pw.text()
 
 
+# ── Database row widget ────────────────────────────────────────────────────────
+
 class _DbRow(QWidget):
-    """
-    Single database row.
-    [● name] [owner] [•••] [conn string + copy] [Change PW] [Drop]
-    """
+    """Single database row — plain QHBoxLayout, no nested stylesheet selectors."""
     change_pw_clicked = pyqtSignal(str)
     drop_clicked      = pyqtSignal(str)
 
     def __init__(self, name, owner, conn_str, parent=None):
         super().__init__(parent)
         self._name = name
-        # Use object name selector so border only applies to THIS widget, not children
-        self.setObjectName("dbRow")
-        self.setStyleSheet(
-            "QWidget#dbRow {"
-            f"  background:{C_SURFACE};"
-            f"  border-bottom:1px solid {C_BORDER};"
-            "}"
-        )
         self.setFixedHeight(56)
+        self.setStyleSheet(
+            f"background:{C_SURFACE};border-bottom:1px solid {C_BORDER};"
+        )
 
         row = QHBoxLayout(self)
         row.setContentsMargins(20, 0, 12, 0)
         row.setSpacing(0)
 
-        # ── ● Name ─────────────────────────────────────────────────────────
+        # Status dot
         dot = QLabel("●")
         dot.setFixedWidth(16)
-        dot.setStyleSheet(f"color:{C_GREEN};font-size:8px;")
+        dot.setStyleSheet(f"color:{C_GREEN};font-size:8px;background:transparent;border:none;")
         row.addWidget(dot)
 
+        # Name
         name_lbl = QLabel(name)
         name_lbl.setFixedWidth(195)
         name_lbl.setStyleSheet(
             f"color:{C_TEXT};font-size:13px;font-weight:700;"
             f"font-family:'Consolas','Courier New',monospace;"
+            f"background:transparent;border:none;"
         )
         row.addWidget(name_lbl)
 
-        # ── Owner ───────────────────────────────────────────────────────────
+        # Owner
         owner_lbl = QLabel(owner)
         owner_lbl.setFixedWidth(148)
         owner_lbl.setStyleSheet(
             f"color:{C_TEXT2};font-size:12px;"
             f"font-family:'Consolas','Courier New',monospace;"
+            f"background:transparent;border:none;"
         )
         row.addWidget(owner_lbl)
 
-        # ── Password dots ───────────────────────────────────────────────────
+        # Password dots
         pw_lbl = QLabel("● ● ● ● ● ● ●")
         pw_lbl.setFixedWidth(120)
         pw_lbl.setStyleSheet(
             f"color:{C_BORDER2};font-size:7px;letter-spacing:3px;"
+            f"background:transparent;border:none;"
         )
         row.addWidget(pw_lbl)
 
-        # ── Connection string box ───────────────────────────────────────────
-        conn_box = QWidget()
-        conn_box.setFixedWidth(268)
-        conn_box.setObjectName("connBox")
-        conn_box.setStyleSheet(
-            "QWidget#connBox {"
-            f"  background:{C_BG};"
-            f"  border:1px solid {C_BORDER};"
-            f"  border-radius:6px;"
-            "}"
-        )
-        cb = QHBoxLayout(conn_box)
-        cb.setContentsMargins(10, 0, 4, 0)
-        cb.setSpacing(4)
-
+        # Connection string box
         short_conn = conn_str[:30] + "…" if len(conn_str) > 30 else conn_str
         conn_lbl = QLabel(short_conn)
         conn_lbl.setToolTip(conn_str)
+        conn_lbl.setFixedWidth(240)
         conn_lbl.setStyleSheet(
             f"color:{C_TEXT3};font-size:11px;"
             f"font-family:'Consolas','Courier New',monospace;"
+            f"background:{C_BG};border:1px solid {C_BORDER};"
+            f"border-radius:6px;padding:0 10px;"
         )
 
         copy_btn = QPushButton("⧉")
         copy_btn.setFixedSize(26, 26)
         copy_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        copy_btn.setToolTip("Copy connection string")
         copy_btn.setStyleSheet(
             f"QPushButton{{background:{C_SURFACE};color:{C_TEXT3};"
             f"border:1px solid {C_BORDER2};border-radius:5px;font-size:12px;}}"
@@ -285,13 +285,12 @@ class _DbRow(QWidget):
             copy_btn.setText("✓"),
             QTimer.singleShot(1200, lambda: copy_btn.setText("⧉"))
         ))
-        cb.addWidget(conn_lbl, 1)
-        cb.addWidget(copy_btn, 0)
-        row.addWidget(conn_box)
+        row.addWidget(conn_lbl)
+        row.addWidget(copy_btn)
 
         row.addStretch()
 
-        # ── Change Password ─────────────────────────────────────────────────
+        # Change Password
         chpw = QPushButton("Change PW")
         chpw.setFixedHeight(30)
         chpw.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -306,7 +305,7 @@ class _DbRow(QWidget):
         row.addSpacing(8)
         row.addWidget(chpw)
 
-        # ── Drop ────────────────────────────────────────────────────────────
+        # Drop
         drop_btn = QPushButton("Drop")
         drop_btn.setFixedHeight(30)
         drop_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -326,37 +325,51 @@ class _DbRow(QWidget):
         return self._name
 
 
+# ── SQL Runner ─────────────────────────────────────────────────────────────────
+
 class _SqlRunner(QWidget):
-    """Table Browser & SQL Runner panel — bottom half of databases page."""
+    """
+    Table browser and SQL runner panel.
+    Key stability fixes:
+      - Only reconnects when the target DB name actually changes
+      - Auto-reconnects if the connection drops mid-session
+      - Schema tree loads immediately; row counts load asynchronously
+    """
 
     def __init__(self, config, parent=None):
         super().__init__(parent)
-        self.config = config
-        self._conn  = None
-        self._workers = []
-        self._current_db = ""
-        self._offset = 0
-        self._page_size = 100
+        self.config         = config
+        self._conn          = None
+        self._workers       = []
+        self._current_db    = ""
+        self._offset        = 0
+        self._page_size     = 100
         self._current_table = None
+        self._total_rows    = 0
         self._build()
 
     def update_config(self, config):
         self.config = config
 
-    def set_db(self, dbname):
-        if dbname == self._current_db and self._conn:
+    def set_db(self, dbname: str):
+        """Switch to a different database. Only reconnects if name changed."""
+        if dbname == self._current_db and self._conn and not self._conn.closed:
             return
-        self._disconnect()
-        self._current_db = dbname
-        self._db_badge.setText(f"DB: {dbname.upper()}")
-        self._connect()
+        if dbname != self._current_db:
+            self._disconnect()
+            self._current_db = dbname
+            self._db_badge.setText(f"DB: {dbname.upper()}" if dbname else "")
+        if dbname:
+            self._connect()
+
+    # ── UI build ───────────────────────────────────────────────────────────────
 
     def _build(self):
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # ── Header ─────────────────────────────────────────────────────────────
+        # Header bar
         hdr = QWidget()
         hdr.setFixedHeight(48)
         hdr.setStyleSheet(f"background:{C_BG};")
@@ -383,7 +396,7 @@ class _SqlRunner(QWidget):
         hh.addWidget(self._db_badge)
         root.addWidget(hdr)
 
-        # ── Body splitter ──────────────────────────────────────────────────────
+        # Splitter
         body = QWidget()
         body.setStyleSheet(f"background:{C_BG};")
         bl = QHBoxLayout(body)
@@ -406,7 +419,9 @@ class _SqlRunner(QWidget):
 
         schema_hdr = QWidget()
         schema_hdr.setFixedHeight(34)
-        schema_hdr.setStyleSheet(f"background:{C_SURFACE2};border-bottom:1px solid {C_BORDER};")
+        schema_hdr.setStyleSheet(
+            f"background:{C_SURFACE2};border-bottom:1px solid {C_BORDER};"
+        )
         sh = QHBoxLayout(schema_hdr)
         sh.setContentsMargins(14, 0, 14, 0)
         schema_lbl = QLabel("SCHEMA: PUBLIC")
@@ -421,26 +436,13 @@ class _SqlRunner(QWidget):
         self._tree.setHeaderHidden(True)
         self._tree.setStyleSheet(f"""
             QTreeWidget {{
-                background:{C_SURFACE};
-                color:{C_TEXT2};
-                border:none;
-                font-size:12px;
-                outline:none;
+                background:{C_SURFACE};color:{C_TEXT2};
+                border:none;font-size:12px;outline:none;
             }}
-            QTreeWidget::item {{
-                padding:5px 8px;
-                border:none;
-            }}
-            QTreeWidget::item:selected {{
-                background:{C_SURFACE2};
-                color:{C_TEXT};
-            }}
-            QTreeWidget::item:hover {{
-                background:{C_BORDER};
-            }}
-            QTreeWidget::branch {{
-                background:{C_SURFACE};
-            }}
+            QTreeWidget::item {{ padding:5px 8px;border:none; }}
+            QTreeWidget::item:selected {{ background:{C_SURFACE2};color:{C_TEXT}; }}
+            QTreeWidget::item:hover {{ background:{C_BORDER}; }}
+            QTreeWidget::branch {{ background:{C_SURFACE}; }}
         """)
         self._tree.itemClicked.connect(self._on_tree_click)
         lv.addWidget(self._tree)
@@ -464,16 +466,19 @@ class _SqlRunner(QWidget):
         sb.setSpacing(8)
 
         sql_icon = QLabel("▢")
-        sql_icon.setStyleSheet(f"color:{C_TEXT3};font-size:14px;background:transparent;")
+        sql_icon.setStyleSheet(
+            f"color:{C_TEXT3};font-size:14px;background:transparent;"
+        )
         sb.addWidget(sql_icon)
 
         self._sql_inp = QLineEdit()
-        self._sql_inp.setPlaceholderText("SELECT * FROM public.users LIMIT 100;")
+        self._sql_inp.setPlaceholderText(
+            "SELECT * FROM public.your_table LIMIT 100;"
+        )
         self._sql_inp.setStyleSheet(
             f"QLineEdit{{background:transparent;border:none;"
             f"color:{C_TEXT};font-family:'Consolas','Courier New',monospace;"
             f"font-size:13px;padding:0;}}"
-            f"QLineEdit:focus{{border:none;outline:none;}}"
         )
         self._sql_inp.returnPressed.connect(self._run_sql)
         sb.addWidget(self._sql_inp)
@@ -496,37 +501,21 @@ class _SqlRunner(QWidget):
         self._results = QTableWidget(0, 0)
         self._results.setStyleSheet(f"""
             QTableWidget {{
-                background:{C_BG};
-                color:{C_TEXT};
-                border:none;
-                gridline-color:{C_BORDER};
-                font-size:12px;
-                font-family:'Consolas','Courier New',monospace;
+                background:{C_BG};color:{C_TEXT};
+                border:none;gridline-color:{C_BORDER};
+                font-size:12px;font-family:'Consolas','Courier New',monospace;
                 outline:none;
             }}
-            QTableWidget::item {{
-                padding:6px 12px;
-                border:none;
-            }}
-            QTableWidget::item:selected {{
-                background:{C_SURFACE2};
-                color:{C_TEXT};
-            }}
+            QTableWidget::item {{ padding:6px 12px;border:none; }}
+            QTableWidget::item:selected {{ background:{C_SURFACE2};color:{C_TEXT}; }}
             QHeaderView::section {{
-                background:{C_SURFACE};
-                color:{C_TEXT3};
-                padding:6px 12px;
-                border:none;
+                background:{C_SURFACE};color:{C_TEXT3};
+                padding:6px 12px;border:none;
                 border-bottom:1px solid {C_BORDER};
-                border-right:1px solid {C_BORDER};
-                font-size:10px;
-                font-weight:700;
+                font-size:10px;font-weight:700;
                 letter-spacing:1px;
-                text-transform:uppercase;
             }}
-            QHeaderView {{
-                background:{C_SURFACE};
-            }}
+            QHeaderView {{ background:{C_SURFACE}; }}
         """)
         self._results.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._results.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -552,26 +541,25 @@ class _SqlRunner(QWidget):
         pg.addWidget(self._row_info)
         pg.addStretch()
 
-        # Pagination buttons matching mockup |< < N/T > >|
-        for text, fn in [
-            ("|◀", self._first_page), ("◀", self._prev_page),
-        ]:
-            b = self._pag_btn(text)
-            b.clicked.connect(fn)
-            pg.addWidget(b)
-
         self._page_lbl = QLabel("1 / 1")
         self._page_lbl.setStyleSheet(
             f"color:{C_TEXT2};font-size:12px;background:transparent;padding:0 8px;"
         )
-        pg.addWidget(self._page_lbl)
 
-        for text, fn in [
-            ("▶", self._next_page), ("▶|", self._last_page),
-        ]:
-            b = self._pag_btn(text)
+        for text, fn in [("◀", self._prev_page), ("▶", self._next_page)]:
+            b = QPushButton(text)
+            b.setFixedSize(28, 26)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setStyleSheet(
+                f"QPushButton{{background:{C_SURFACE2};color:{C_TEXT2};"
+                f"border:1px solid {C_BORDER};border-radius:4px;"
+                f"font-size:11px;font-weight:700;}}"
+                f"QPushButton:hover{{background:{C_BORDER2};color:{C_TEXT};}}"
+            )
             b.clicked.connect(fn)
             pg.addWidget(b)
+            if text == "◀":
+                pg.addWidget(self._page_lbl)
 
         rv.addWidget(pag)
         splitter.addWidget(right)
@@ -579,40 +567,51 @@ class _SqlRunner(QWidget):
         bl.addWidget(splitter)
         root.addWidget(body)
 
-    def _pag_btn(self, text):
-        b = QPushButton(text)
-        b.setFixedSize(28, 26)
-        b.setCursor(Qt.CursorShape.PointingHandCursor)
-        b.setStyleSheet(
-            f"QPushButton{{background:{C_SURFACE2};color:{C_TEXT2};"
-            f"border:1px solid {C_BORDER};border-radius:4px;"
-            f"font-size:11px;font-weight:700;}}"
-            f"QPushButton:hover{{background:{C_BORDER2};color:{C_TEXT};}}"
-            f"QPushButton:disabled{{color:{C_TEXT3};}}"
+    # ── Connection ─────────────────────────────────────────────────────────────
+
+    def _get_conn(self):
+        """Return the existing connection, or create a new one."""
+        if self._conn and not self._conn.closed:
+            return self._conn
+        c = self.config
+        import psycopg2
+        self._conn = psycopg2.connect(
+            host="127.0.0.1", port=c["port"],
+            user=c["username"], password=c["password"],
+            dbname=self._current_db, connect_timeout=5,
         )
-        return b
+        return self._conn
 
     def _connect(self):
         if not self._current_db:
             return
-        c = self.config
-        try:
-            import psycopg2
-            self._conn = psycopg2.connect(
-                host="127.0.0.1", port=c["port"],
-                user=c["username"], password=c["password"],
-                dbname=self._current_db, connect_timeout=5
-            )
-            self._run_btn.setEnabled(True)
-            self._load_schema()
-        except Exception as e:
-            self._row_info.setText(f"Connection error: {e}")
+        self._run_btn.setEnabled(False)
+        self._row_info.setText("Connecting...")
+
+        def fn():
+            return self._get_conn()
+
+        w = _Worker(fn)
+        w.result.connect(self._on_connected)
+        w.start()
+        self._workers.append(w)
+
+    def _on_connected(self, conn, error):
+        if error:
+            self._row_info.setText(f"Connection error: {error[:80]}")
+            self._run_btn.setEnabled(False)
+            return
+        self._run_btn.setEnabled(True)
+        self._row_info.setText("")
+        self._load_schema()
 
     def _disconnect(self):
         if self._conn:
-            try: self._conn.close()
-            except Exception: pass
-        self._conn = None
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+        self._conn      = None
         self._tree.clear()
         self._results.clear()
         self._results.setColumnCount(0)
@@ -620,12 +619,19 @@ class _SqlRunner(QWidget):
         self._run_btn.setEnabled(False)
         self._page_lbl.setText("1 / 1")
         self._row_info.setText("")
+        self._current_table = None
+        self._offset        = 0
+        self._total_rows    = 0
+
+    # ── Schema loading ─────────────────────────────────────────────────────────
 
     def _load_schema(self):
-        if not self._conn:
+        if not self._current_db:
             return
+
         def fn():
-            cur = self._conn.cursor()
+            conn = self._get_conn()
+            cur  = conn.cursor()
             cur.execute("""
                 SELECT table_schema, table_name, table_type
                 FROM information_schema.tables
@@ -633,27 +639,28 @@ class _SqlRunner(QWidget):
                 ORDER BY table_schema, table_type DESC, table_name
             """)
             rows = cur.fetchall()
-            cur.execute("""
-                SELECT schemaname, tablename, n_live_tup
-                FROM pg_stat_user_tables
-                ORDER BY n_live_tup DESC
-            """)
-            stats = {(r[0], r[1]): r[2] for r in cur.fetchall()}
             cur.close()
-            return rows, stats
+            return rows
 
         w = _Worker(fn)
         w.result.connect(self._on_schema)
         w.start()
         self._workers.append(w)
 
-    def _on_schema(self, data, error):
-        if error or not data:
-            return
-        rows, stats = data
+    def _on_schema(self, rows, error):
         self._tree.clear()
+        if error:
+            self._row_info.setText(f"Schema error: {error[:80]}")
+            return
+        if not rows:
+            # Empty database — show placeholder
+            placeholder = QTreeWidgetItem(self._tree)
+            placeholder.setText(0, "  (no tables yet)")
+            placeholder.setForeground(0, QColor(C_TEXT3))
+            return
 
-        schemas = {}
+        # Group by schema → tables / views
+        schemas: dict = {}
         for schema, table, ttype in rows:
             schemas.setdefault(schema, {"tables": [], "views": []})
             if ttype == "BASE TABLE":
@@ -663,46 +670,31 @@ class _SqlRunner(QWidget):
 
         for schema, groups in schemas.items():
             if groups["tables"]:
-                tables_item = QTreeWidgetItem(self._tree)
-                tables_item.setText(0, "  Tables")
-                tables_item.setExpanded(True)
-                tables_item.setForeground(0, QColor(C_TEXT3))
-                f = QFont(); f.setWeight(QFont.Weight.Bold)
-                tables_item.setFont(0, f)
+                tables_hdr = QTreeWidgetItem(self._tree)
+                tables_hdr.setText(0, "  Tables")
+                tables_hdr.setExpanded(True)
+                tables_hdr.setForeground(0, QColor(C_TEXT3))
+                f = QFont()
+                f.setBold(True)
+                tables_hdr.setFont(0, f)
 
                 for t in groups["tables"]:
-                    child = QTreeWidgetItem(tables_item)
-                    count = stats.get((schema, t))
-                    label = f"  {t}"
-                    child.setText(0, label)
-                    if count is not None:
-                        count_str = f"{count/1000:.1f}k" if count >= 1000 else str(count)
-                        child.setText(0, f"  {t}")
-                        child.setData(0, Qt.ItemDataRole.UserRole + 1, count_str)
-                    child.setData(0, Qt.ItemDataRole.UserRole, (schema, t))
-                    child.setForeground(0, QColor(C_TEXT2))
-
-            if groups["views"]:
-                views_item = QTreeWidgetItem(self._tree)
-                views_item.setText(0, "  Views")
-                views_item.setExpanded(True)
-                views_item.setForeground(0, QColor(C_TEXT3))
-
-                for t in groups["views"]:
-                    child = QTreeWidgetItem(views_item)
+                    child = QTreeWidgetItem(tables_hdr)
                     child.setText(0, f"  {t}")
                     child.setData(0, Qt.ItemDataRole.UserRole, (schema, t))
                     child.setForeground(0, QColor(C_TEXT2))
 
-        if groups.get("tables") or groups.get("views"):
-            fn_item = QTreeWidgetItem()
-            fn_item.setText(0, "  Functions")
-            fn_item.setForeground(0, QColor(C_TEXT3))
-            self._tree.insertTopLevelItem(0, fn_item)
+            if groups["views"]:
+                views_hdr = QTreeWidgetItem(self._tree)
+                views_hdr.setText(0, "  Views")
+                views_hdr.setExpanded(True)
+                views_hdr.setForeground(0, QColor(C_TEXT3))
 
-            pol_item = QTreeWidgetItem(self._tree)
-            pol_item.setText(0, "  Policies")
-            pol_item.setForeground(0, QColor(C_TEXT3))
+                for t in groups["views"]:
+                    child = QTreeWidgetItem(views_hdr)
+                    child.setText(0, f"  {t}")
+                    child.setData(0, Qt.ItemDataRole.UserRole, (schema, t))
+                    child.setForeground(0, QColor(C_TEXT2))
 
     def _on_tree_click(self, item, _col):
         data = item.data(0, Qt.ItemDataRole.UserRole)
@@ -711,29 +703,33 @@ class _SqlRunner(QWidget):
         schema, name = data
         self._current_table = f'"{schema}"."{name}"'
         self._offset = 0
-        self._sql_inp.setText(f"SELECT * FROM {self._current_table} LIMIT {self._page_size};")
+        self._sql_inp.setText(
+            f"SELECT * FROM {self._current_table} LIMIT {self._page_size};"
+        )
         self._load_data()
 
+    # ── Data loading ───────────────────────────────────────────────────────────
+
     def _load_data(self):
-        if not self._conn or not self._current_table:
+        if not self._current_table:
             return
-        tbl = self._current_table
+        tbl    = self._current_table
         offset = self._offset
         limit  = self._page_size
 
         def fn():
-            cur = self._conn.cursor()
+            conn = self._get_conn()
+            cur  = conn.cursor()
             cur.execute(f"SELECT * FROM {tbl} LIMIT {limit} OFFSET {offset}")
-            cols = [d[0] for d in cur.description]
-            col_types = [d[1] for d in cur.description]
-            rows = cur.fetchall()
+            cols  = [d[0] for d in cur.description]
+            rows  = cur.fetchall()
             try:
                 cur.execute(f"SELECT COUNT(*) FROM {tbl}")
                 total = cur.fetchone()[0]
             except Exception:
                 total = 0
             cur.close()
-            return cols, col_types, rows, total
+            return cols, rows, total
 
         w = _Worker(fn)
         w.result.connect(self._on_data)
@@ -742,56 +738,31 @@ class _SqlRunner(QWidget):
 
     def _on_data(self, data, error):
         if error:
-            self._row_info.setText(f"Error: {error[:80]}")
+            self._row_info.setText(f"Error: {error[:100]}")
+            # If connection dropped, reconnect
+            if "closed" in error.lower() or "connection" in error.lower():
+                self._conn = None
+                QTimer.singleShot(500, self._connect)
             return
         if not data:
             return
-        cols, col_types, rows, total = data
-        self._populate(cols, col_types, rows)
+        cols, rows, total = data
+        self._total_rows = total
+        self._populate(cols, rows)
 
-        total_pages = max(1, (total + self._page_size - 1) // self._page_size)
-        current_page = self._offset // self._page_size + 1
-        end_row = min(self._offset + self._page_size, total)
-        self._page_lbl.setText(f"{current_page} / {total_pages}")
+        pages = max(1, (total + self._page_size - 1) // self._page_size)
+        page  = self._offset // self._page_size + 1
+        self._page_lbl.setText(f"{page} / {pages}")
         self._row_info.setText(
-            f"SHOWING {min(len(rows), self._page_size)} OF {total:,} ROWS  ·  TIME: —"
+            f"Showing {self._offset + 1}–{self._offset + len(rows)} of {total:,}"
+            if rows else "No rows"
         )
 
-    def _populate(self, cols, col_types, rows):
-        import psycopg2
-        TYPE_LABELS = {}
-        try:
-            cur = self._conn.cursor()
-            cur.execute("SELECT oid, typname FROM pg_type")
-            for oid, typname in cur.fetchall():
-                TYPE_LABELS[oid] = typname.upper()
-            cur.close()
-        except Exception:
-            pass
-
+    def _populate(self, cols, rows):
         self._results.clear()
         self._results.setColumnCount(len(cols))
         self._results.setRowCount(len(rows))
-
-        headers = []
-        for i, (col, oid) in enumerate(zip(cols, col_types)):
-            type_label = TYPE_LABELS.get(oid, "")
-            header = QTableWidgetItem(col)
-            header.setData(Qt.ItemDataRole.UserRole, type_label)
-            headers.append(col)
-
-        self._results.setHorizontalHeaderLabels(headers)
-
-        for i, (col, oid) in enumerate(zip(cols, col_types)):
-            type_label = TYPE_LABELS.get(oid, "")
-            if type_label:
-                hi = self._results.horizontalHeaderItem(i)
-                if hi:
-                    hi.setText(f"{col}")
-                    full = f"{col}  {type_label}"
-                    w2 = QTableWidgetItem(full)
-                    w2.setForeground(QColor(C_TEXT3))
-                    self._results.setHorizontalHeaderItem(i, w2)
+        self._results.setHorizontalHeaderLabels(cols)
 
         for r, row in enumerate(rows):
             for c, val in enumerate(row):
@@ -799,7 +770,6 @@ class _SqlRunner(QWidget):
                 cell = QTableWidgetItem(text)
                 if val is None:
                     cell.setForeground(QColor(C_TEXT3))
-                    cell.setFont(QFont("italic"))
                 self._results.setItem(r, c, cell)
 
         self._results.horizontalHeader().setSectionResizeMode(
@@ -808,27 +778,45 @@ class _SqlRunner(QWidget):
         if self._results.columnCount() > 0:
             self._results.horizontalHeader().setStretchLastSection(True)
 
+    def _prev_page(self):
+        if self._offset > 0:
+            self._offset = max(0, self._offset - self._page_size)
+            self._load_data()
+
+    def _next_page(self):
+        if self._offset + self._page_size < self._total_rows:
+            self._offset += self._page_size
+            self._load_data()
+
+    # ── SQL runner ─────────────────────────────────────────────────────────────
+
     def _run_sql(self):
         sql = self._sql_inp.text().strip()
-        if not sql or not self._conn:
+        if not sql:
             return
+        if not self._current_db:
+            self._row_info.setText("No database selected.")
+            return
+
         self._run_btn.setEnabled(False)
-        self._row_info.setText("Running...")
+        self._row_info.setText("Running…")
 
         def fn():
-            cur = self._conn.cursor()
             import time
-            t0 = time.time()
+            conn = self._get_conn()
+            conn.autocommit = False
+            cur  = conn.cursor()
+            t0   = time.time()
             cur.execute(sql)
             elapsed = int((time.time() - t0) * 1000)
             if cur.description:
                 cols = [d[0] for d in cur.description]
-                col_types = [d[1] for d in cur.description]
                 rows = cur.fetchmany(500)
+                conn.rollback()   # don't keep a transaction open after SELECT
                 cur.close()
-                return "select", cols, col_types, rows, elapsed
+                return "select", cols, rows, elapsed
             else:
-                self._conn.commit()
+                conn.commit()
                 affected = cur.rowcount
                 cur.close()
                 return "exec", affected, elapsed
@@ -841,7 +829,11 @@ class _SqlRunner(QWidget):
     def _on_sql_done(self, data, error):
         self._run_btn.setEnabled(True)
         if error:
-            self._row_info.setText(f"Error: {error[:100]}")
+            # Try to recover a dead connection
+            if "closed" in error.lower() or "connection" in error.lower():
+                self._conn = None
+                QTimer.singleShot(300, self._connect)
+            self._row_info.setText(f"Error: {error[:120]}")
             self._results.setRowCount(0)
             self._results.setColumnCount(1)
             self._results.setHorizontalHeaderLabels(["Error"])
@@ -852,10 +844,10 @@ class _SqlRunner(QWidget):
         if not data:
             return
         if data[0] == "select":
-            _, cols, col_types, rows, elapsed = data
-            self._populate(cols, col_types, rows)
+            _, cols, rows, elapsed = data
+            self._populate(cols, rows)
             self._row_info.setText(
-                f"SHOWING {len(rows)} OF {len(rows)} ROWS  ·  TIME: {elapsed}ms"
+                f"{len(rows)} rows  ·  {elapsed}ms"
             )
             self._page_lbl.setText("1 / 1")
         else:
@@ -863,51 +855,39 @@ class _SqlRunner(QWidget):
             self._results.setRowCount(0)
             self._results.setColumnCount(0)
             self._row_info.setText(
-                f"OK — {affected} row(s) affected  ·  TIME: {elapsed}ms"
+                f"OK — {affected} row(s) affected  ·  {elapsed}ms"
             )
 
-    def _first_page(self):
-        self._offset = 0
-        self._load_data()
 
-    def _prev_page(self):
-        self._offset = max(0, self._offset - self._page_size)
-        self._load_data()
-
-    def _next_page(self):
-        self._offset += self._page_size
-        self._load_data()
-
-    def _last_page(self):
-        pass
-
+# ── DatabasesTab ──────────────────────────────────────────────────────────────
 
 class DatabasesTab(QWidget):
     """
-    Full Databases page — Managed Databases list + Table Browser & SQL Runner.
-    Callbacks are passed in from main_window to keep all logic there.
+    Full Databases page — managed database list + Table Browser & SQL Runner.
     """
 
     def __init__(self, config, manager,
                  on_create, on_drop, on_change_pw, on_refresh,
                  parent=None):
         super().__init__(parent)
-        self.config      = config
-        self._manager    = manager
-        self._on_create  = on_create
-        self._on_drop    = on_drop
-        self._on_chpw    = on_change_pw
+        self.config     = config
+        self._manager   = manager
+        self._on_create = on_create
+        self._on_drop   = on_drop
+        self._on_chpw   = on_change_pw
         self._on_refresh = on_refresh
-        self._db_rows    = []
-        self._workers    = []
+        self._workers   = []
         self._build()
 
     def update_config(self, config):
         self.config = config
         self._sql_runner.update_config(config)
 
+    # ── Build ──────────────────────────────────────────────────────────────────
+
     def _build(self):
         root = QVBoxLayout(self)
+
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
@@ -919,80 +899,68 @@ class DatabasesTab(QWidget):
 
         body = QWidget()
         body.setStyleSheet("background:#1a1d23;")
+
         bv = QVBoxLayout(body)
         bv.setContentsMargins(28, 28, 28, 0)
         bv.setSpacing(0)
 
-        # ── Page header ────────────────────────────────────────────────────────
-        page_hdr = QHBoxLayout()
-        page_hdr.setSpacing(0)
+        scroll.setWidget(body)
+        root.addWidget(scroll)
 
+        # Page header
+        page_hdr = QHBoxLayout()
         hdr_col = QVBoxLayout()
         hdr_col.setSpacing(4)
         title = QLabel("Managed Databases")
         title.setStyleSheet(
             f"color:{C_TEXT};font-size:24px;font-weight:800;background:transparent;"
         )
-        sub = QLabel("Orchestrate and monitor your PostgreSQL isolated instances.")
+        sub = QLabel("Create isolated PostgreSQL databases, browse tables, and run SQL.")
         sub.setStyleSheet(f"color:{C_TEXT3};font-size:12px;background:transparent;")
         hdr_col.addWidget(title)
         hdr_col.addWidget(sub)
-
         page_hdr.addLayout(hdr_col)
         page_hdr.addStretch()
 
         new_btn = QPushButton("  +  New Database")
         new_btn.setFixedHeight(42)
         new_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        new_btn.setStyleSheet(f"""
-            QPushButton {{
-                background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
-                    stop:0 {C_BLUE}, stop:1 #2563eb);
-                color: white;
-                border: none;
-                border-radius: 8px;
-                font-size: 13px;
-                font-weight: 700;
-                padding: 0 22px;
-            }}
-            QPushButton:hover {{
-                background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
-                    stop:0 #3b7de8, stop:1 #1d4ed8);
-            }}
-        """)
+        new_btn.setStyleSheet(
+            f"QPushButton{{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            f"stop:0 {C_BLUE},stop:1 #2563eb);"
+            f"color:white;border:none;border-radius:8px;"
+            f"font-size:13px;font-weight:700;padding:0 22px;}}"
+            f"QPushButton:hover{{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            f"stop:0 #3b7de8,stop:1 #1d4ed8);}}"
+        )
         new_btn.clicked.connect(self._on_create)
         page_hdr.addWidget(new_btn)
-
         bv.addLayout(page_hdr)
         bv.addSpacing(20)
 
-        # ── Databases table ────────────────────────────────────────────────────
+        # Database list container
         self._db_container = QWidget()
-        self._db_container.setObjectName("dbContainer")
         self._db_container.setStyleSheet(
-            "QWidget#dbContainer {"
-            f"  background:{C_SURFACE};"
-            f"  border:1px solid {C_BORDER};"
-            f"  border-radius:10px;"
-            "}"
+            f"background:{C_SURFACE};border:1px solid {C_BORDER};border-radius:10px;"
         )
         self._db_layout = QVBoxLayout(self._db_container)
         self._db_layout.setContentsMargins(0, 0, 0, 0)
         self._db_layout.setSpacing(0)
 
-        self._db_header = self._build_table_header()
-        self._db_layout.addWidget(self._db_header)
+        # Column headers
+        self._db_layout.addWidget(self._build_table_header())
 
-        # Empty-state label lives directly in _db_layout — never in the rows container
-        # so it can never be hit by deleteLater() when rows are cleared.
-        self._empty_lbl = QLabel("No databases yet. Click + New Database to create one.")
+        # Empty state label — stays in _db_layout, never in rows container
+        self._empty_lbl = QLabel(
+            "No databases yet. Click + New Database to create one."
+        )
         self._empty_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._empty_lbl.setStyleSheet(
             f"color:{C_TEXT3};font-size:12px;padding:40px;background:transparent;"
         )
         self._db_layout.addWidget(self._empty_lbl)
 
-        # Rows container is separate — hidden when empty
+        # Rows container — separate from empty label
         self._db_rows_container = QWidget()
         self._db_rows_container.setStyleSheet("background:transparent;")
         self._db_rows_container.setVisible(False)
@@ -1003,71 +971,60 @@ class DatabasesTab(QWidget):
         bv.addWidget(self._db_container)
         bv.addSpacing(28)
 
-        # ── Table Browser & SQL Runner ─────────────────────────────────────────
+        # SQL Runner
         runner_container = QWidget()
         runner_container.setFixedHeight(560)
-        runner_container.setStyleSheet(
-            f"background:{C_SURFACE};border:0px solid {C_BORDER};"
-        )
+        runner_container.setStyleSheet(f"background:{C_SURFACE};")
         rl = QVBoxLayout(runner_container)
         rl.setContentsMargins(0, 0, 0, 0)
         rl.setSpacing(0)
-
         self._sql_runner = _SqlRunner(self.config)
         rl.addWidget(self._sql_runner)
         bv.addWidget(runner_container)
         bv.addSpacing(28)
 
-        scroll.setWidget(body)
-        root.addLayout(QVBoxLayout())
-        root2 = self.layout()
-        root2.addWidget(scroll)
-
     def _build_table_header(self):
         hdr = QWidget()
         hdr.setFixedHeight(38)
-        hdr.setObjectName("dbTableHeader")
         hdr.setStyleSheet(
-            "QWidget#dbTableHeader {"
-            f"  background:{C_SURFACE2};"
-            f"  border-bottom:1px solid {C_BORDER};"
-            f"  border-radius:10px 10px 0 0;"
-            "}"
+            f"background:{C_SURFACE2};"
+            f"border-bottom:1px solid {C_BORDER};"
+            f"border-radius:10px 10px 0 0;"
         )
         h = QHBoxLayout(hdr)
         h.setContentsMargins(20, 0, 12, 0)
         h.setSpacing(0)
 
-        # col widths must mirror _DbRow exactly:
-        # dot(16) + name(195) = 211 → label width 211
-        # owner 148, password 120, conn 268, then stretch for actions
         cols = [
             ("DATABASE NAME",     211),
             ("OWNER",             148),
             ("PASSWORD",          120),
-            ("CONNECTION STRING", 268),
+            ("CONNECTION STRING", 266),
             ("",                    0),
         ]
         for text, width in cols:
             lbl = QLabel(text)
             lbl.setStyleSheet(
                 f"color:{C_TEXT3};font-size:9px;font-weight:700;"
-                f"letter-spacing:1.5px;"
+                f"letter-spacing:1.5px;background:transparent;"
             )
             if width:
                 lbl.setFixedWidth(width)
             else:
-                lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+                lbl.setSizePolicy(
+                    QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
+                )
             h.addWidget(lbl)
-
         return hdr
+
+    # ── Populate ───────────────────────────────────────────────────────────────
 
     def populate(self, dbs, manager):
         self._manager = manager
         ip   = manager.get_lan_ip()
         port = self.config["port"]
 
-        # Clear old rows — _empty_lbl is NOT in this layout so it's safe
+        # Clear old rows safely — _empty_lbl is NOT in this layout
         while self._db_rows_layout.count():
             child = self._db_rows_layout.takeAt(0)
             if child.widget():
@@ -1088,15 +1045,16 @@ class DatabasesTab(QWidget):
             row   = _DbRow(name, owner, conn)
             row.change_pw_clicked.connect(self._on_chpw)
             row.drop_clicked.connect(self._on_drop)
-            row.setFixedHeight(56)
             self._db_rows_layout.addWidget(row)
 
-        self._sql_runner.set_db(dbs[0]["name"])
+        # Switch SQL runner to the first database
+        if dbs:
+            self._sql_runner.set_db(dbs[0]["name"])
 
     def refresh_databases(self, dbs):
         self.populate(dbs, self._manager)
 
-    def get_db_names(self):
+    def get_db_names(self) -> list[str]:
         names = []
         for i in range(self._db_rows_layout.count()):
             w = self._db_rows_layout.itemAt(i).widget()

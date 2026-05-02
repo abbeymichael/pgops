@@ -1,8 +1,7 @@
 """
 tab_server.py  — Phase 2 edition
 Adds Caddy and FrankenPHP infrastructure cards below the pgAdmin card.
-Each follows the exact same layout pattern as the pgAdmin card:
-  status badge | URL/info row | action buttons | optional warning note.
+pgAdmin card shows https://pgadmin.pgops.local (via Caddy) not the raw port.
 """
 
 from PyQt6.QtWidgets import (
@@ -110,13 +109,13 @@ class ServerTab(QWidget):
         row2.addWidget(self._logs_card(), 5)
         bv.addLayout(row2)
 
-        # Row 3 – pgAdmin (unchanged)
+        # Row 3 – pgAdmin
         bv.addWidget(self._pgadmin_card())
 
-        # Row 4 – Caddy (Phase 2)
+        # Row 4 – Caddy
         bv.addWidget(self._caddy_card())
 
-        # Row 5 – FrankenPHP (Phase 2)
+        # Row 5 – FrankenPHP
         bv.addWidget(self._frankenphp_card())
 
         scroll.setWidget(body)
@@ -413,7 +412,7 @@ class ServerTab(QWidget):
         v.addWidget(self._log_box)
         return card
 
-    # ── pgAdmin card (unchanged logic, kept intact) ───────────────────────────
+    # ── pgAdmin card ──────────────────────────────────────────────────────────
 
     def _pgadmin_card(self):
         card = _card()
@@ -421,6 +420,7 @@ class ServerTab(QWidget):
         v.setContentsMargins(22, 18, 22, 18)
         v.setSpacing(12)
 
+        # Header row
         hdr = QHBoxLayout()
         t = QLabel("pgAdmin 4 — Database Web UI")
         t.setStyleSheet(
@@ -437,17 +437,19 @@ class ServerTab(QWidget):
         hdr.addWidget(self._pga_badge)
         v.addLayout(hdr)
 
+        # URL row — shows the Caddy HTTPS subdomain, not the raw port
         info = QHBoxLayout()
         url_key = QLabel("URL")
         url_key.setStyleSheet(
             f"color:{C_TEXT3};font-size:11px;background:transparent;"
         )
-        self._pga_url = QLabel("http://pgops.test:5050")
+        # Default shows port; update_pgadmin_status() keeps it in sync
+        self._pga_url = QLabel(self._pgadmin_public_url())
         self._pga_url.setStyleSheet(
             f"color:{C_BLUE};font-family:'Consolas','Courier New',monospace;"
             f"font-size:12px;background:transparent;"
         )
-        cred = QLabel("Login: admin@pgops.com  /  pgopsadmin")
+        cred = QLabel(f"Login: admin@pgops.com  /  pgopsadmin")
         cred.setStyleSheet(
             f"color:{C_TEXT3};font-family:'Consolas','Courier New',monospace;"
             f"font-size:11px;background:transparent;"
@@ -460,6 +462,17 @@ class ServerTab(QWidget):
         info.addStretch()
         v.addLayout(info)
 
+        # Proxy note
+        proxy_note = QLabel(
+            "ⓘ  Served via Caddy reverse proxy — Caddy must be running to access this URL."
+        )
+        proxy_note.setWordWrap(True)
+        proxy_note.setStyleSheet(
+            f"color:{C_TEXT3};font-size:11px;background:transparent;"
+        )
+        v.addWidget(proxy_note)
+
+        # Buttons
         btns = QHBoxLayout()
         btns.setSpacing(8)
 
@@ -502,10 +515,19 @@ class ServerTab(QWidget):
 
         return card
 
+    def _pgadmin_public_url(self) -> str:
+        """Compute the correct public URL based on Caddy's https_port."""
+        try:
+            port = self._caddy.https_port
+            if port == 443:
+                return "https://pgadmin.pgops.local"
+            return f"https://pgadmin.pgops.local:{port}"
+        except Exception:
+            return "https://pgadmin.pgops.local:8443"
+
     # ── Caddy card ────────────────────────────────────────────────────────────
 
     def _caddy_card(self):
-        """Reverse proxy control card — mirrors pgAdmin card layout."""
         card = _card()
         v = QVBoxLayout(card)
         v.setContentsMargins(22, 18, 22, 18)
@@ -513,7 +535,7 @@ class ServerTab(QWidget):
 
         # Header row
         hdr = QHBoxLayout()
-        t = QLabel("Caddy — Reverse Proxy")
+        t = QLabel("Caddy — Reverse Proxy & HTTPS")
         t.setStyleSheet(
             f"color:{C_TEXT};font-size:14px;font-weight:700;background:transparent;"
         )
@@ -528,17 +550,16 @@ class ServerTab(QWidget):
         hdr.addWidget(self._caddy_badge)
         v.addLayout(hdr)
 
-        # Info row
+        # Subdomain info
         info = QHBoxLayout()
         info.setSpacing(20)
-        info_lbl = QLabel(
-            "Routes  *.pgops.test → app servers  ·  Listens on port 80"
-        )
-        info_lbl.setStyleSheet(
+        self._caddy_info_lbl = QLabel(self._caddy_subdomains_text())
+        self._caddy_info_lbl.setWordWrap(True)
+        self._caddy_info_lbl.setStyleSheet(
             f"color:{C_TEXT3};font-family:'Consolas','Courier New',monospace;"
             f"font-size:11px;background:transparent;"
         )
-        info.addWidget(info_lbl)
+        info.addWidget(self._caddy_info_lbl)
         info.addStretch()
         v.addLayout(info)
 
@@ -553,7 +574,7 @@ class ServerTab(QWidget):
         )
         v.addWidget(self._caddy_prog)
 
-        # Button row
+        # Buttons
         btns = QHBoxLayout()
         btns.setSpacing(8)
 
@@ -582,7 +603,6 @@ class ServerTab(QWidget):
         btns.addStretch()
         v.addLayout(btns)
 
-        # Not-available note
         if not self._caddy.is_available():
             self._caddy_note = QLabel(
                 "Caddy binary not found. Click Setup Caddy to download it (~30 MB)."
@@ -598,10 +618,22 @@ class ServerTab(QWidget):
 
         return card
 
+    def _caddy_subdomains_text(self) -> str:
+        try:
+            port = self._caddy.https_port
+            suffix = f":{port}" if port != 443 else ""
+        except Exception:
+            suffix = ":8443"
+        return (
+            f"pgops.local{suffix}  ·  "
+            f"pgadmin.pgops.local{suffix}  ·  "
+            f"minio.pgops.local{suffix}  ·  "
+            f"console.pgops.local{suffix}"
+        )
+
     # ── FrankenPHP card ───────────────────────────────────────────────────────
 
     def _frankenphp_card(self):
-        """PHP app server control card — mirrors pgAdmin/Caddy card layout."""
         card = _card()
         v = QVBoxLayout(card)
         v.setContentsMargins(22, 18, 22, 18)
@@ -648,7 +680,7 @@ class ServerTab(QWidget):
         )
         v.addWidget(self._fphp_prog)
 
-        # Button row
+        # Buttons
         btns = QHBoxLayout()
         btns.setSpacing(8)
 
@@ -687,7 +719,6 @@ class ServerTab(QWidget):
         )
         v.addWidget(platform_note)
 
-        # Not-available note
         if not self._frankenphp.is_binary_available():
             self._fphp_note = QLabel(
                 "FrankenPHP not found. Click Setup FrankenPHP to download it (~150 MB)."
@@ -733,6 +764,9 @@ class ServerTab(QWidget):
             )
 
     def update_pgadmin_status(self, running, available):
+        # Keep the URL label in sync with Caddy's current https_port
+        self._pga_url.setText(self._pgadmin_public_url())
+
         if not available:
             self._pga_badge.setText("NOT AVAILABLE")
             self._pga_badge.setStyleSheet(
@@ -756,6 +790,9 @@ class ServerTab(QWidget):
             )
 
     def update_caddy_status(self, running: bool, available: bool):
+        # Refresh subdomain text in case port changed
+        self._caddy_info_lbl.setText(self._caddy_subdomains_text())
+
         if not available:
             self._caddy_badge.setText("NOT INSTALLED")
             self._caddy_badge.setStyleSheet(
@@ -781,10 +818,6 @@ class ServerTab(QWidget):
             )
 
     def update_frankenphp_status(self, running_count: int, available: bool):
-        """
-        running_count: number of app processes currently alive.
-        available:     whether the binary exists.
-        """
         if not available:
             self._fphp_badge.setText("NOT INSTALLED")
             self._fphp_badge.setStyleSheet(

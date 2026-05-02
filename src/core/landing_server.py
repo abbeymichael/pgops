@@ -1,7 +1,7 @@
 """
 landing_server.py
 Tiny HTTP server on 127.0.0.1:8080.
-Serves the pgops.test landing page — Caddy proxies pgops.test → here.
+Serves the pgops.local landing page — Caddy proxies pgops.local → here.
 """
 
 import threading
@@ -10,7 +10,7 @@ from typing import Callable, Optional
 
 
 LANDING_HOST = "127.0.0.1"
-LANDING_PORT = 8080   # Caddy proxies pgops.test → here; set via config["landing_port"]
+LANDING_PORT = 8080  # Caddy proxies pgops.local → here; set via config["landing_port"]
 
 _STYLE = """
 <style>
@@ -76,7 +76,7 @@ _STYLE = """
 _SETUP_HTML = """
 <div class="setup">
   <h3>Point your device to this DNS server</h3>
-  <p>Do this once per device. After that, all app subdomains (*.pgops.test) work automatically.</p>
+  <p>Do this once per device. After that, all app subdomains (*.pgops.local) work automatically.</p>
   <div class="ip-block">{host_ip}</div>
   <details>
     <summary>Windows</summary>
@@ -122,16 +122,16 @@ class _Handler(BaseHTTPRequestHandler):
             self.wfile.write(b"ok")
             return
 
-        apps    = self.get_apps()
+        apps = self.get_apps()
         host_ip = self.get_host_ip()
 
         # Apps section
         if apps:
             cards = ""
             for app in apps:
-                status  = app.get("status", "stopped")
-                badge   = f'<span class="badge {status}">{status.upper()}</span>'
-                domain  = app.get("domain", "")
+                status = app.get("status", "stopped")
+                badge = f'<span class="badge {status}">{status.upper()}</span>'
+                domain = app.get("domain", "")
                 cards += f"""
                 <div class="app-card">
                   <div class="app-name">{app.get("display_name", app["id"])}</div>
@@ -158,7 +158,7 @@ class _Handler(BaseHTTPRequestHandler):
     <div class="logo">PG</div>
     <div>
       <h1>PGOps Local Server</h1>
-      <div class="sub">pgops.test — your local app platform</div>
+      <div class="sub">pgops.local — your local app platform</div>
     </div>
   </div>
   <div class="content">
@@ -167,7 +167,7 @@ class _Handler(BaseHTTPRequestHandler):
     <h2>Device Setup</h2>
     {setup}
   </div>
-  <footer>PGOps — Portable PostgreSQL + App Platform · pgops.test</footer>
+  <footer>PGOps — Portable PostgreSQL + App Platform · pgops.local</footer>
 </body>
 </html>"""
 
@@ -181,15 +181,21 @@ class _Handler(BaseHTTPRequestHandler):
 
 class LandingServer:
     """
-    Serves the pgops.test root page on LANDING_PORT (8080).
-    Caddy proxies pgops.test → here.
+    Serves the pgops.local root page on LANDING_PORT (8080).
+    Caddy proxies pgops.local → here.
     """
 
-    def __init__(self, get_apps: Callable, get_host_ip: Callable, log_fn=None, port: int = LANDING_PORT):
-        self._get_apps    = get_apps
+    def __init__(
+        self,
+        get_apps: Callable,
+        get_host_ip: Callable,
+        log_fn=None,
+        port: int = LANDING_PORT,
+    ):
+        self._get_apps = get_apps
         self._get_host_ip = get_host_ip
-        self._log         = log_fn or print
-        self._port        = port
+        self._log = log_fn or print
+        self._port = port
         self._server: Optional[HTTPServer] = None
         self._thread: Optional[threading.Thread] = None
 
@@ -198,8 +204,8 @@ class LandingServer:
             return True, "Landing server already running."
 
         class _H(_Handler):
-            get_apps    = self._get_apps
-            get_host_ip = self._get_host_ip
+            get_apps = staticmethod(self._get_apps)
+            get_host_ip = staticmethod(self._get_host_ip)
 
         port = self._port
         try:

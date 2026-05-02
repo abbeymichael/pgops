@@ -185,7 +185,7 @@ class NetworkTab(QWidget):
         v.addWidget(iface_card)
 
         # ── mDNS card ──────────────────────────────────────────────────────────
-        mdns_card = self._card("Local Domain  —  pgops.test")
+        mdns_card = self._card("Local Domain  —  pgops.local")
         mc = mdns_card.layout()
 
         self.mdns_status_lbl = QLabel("Checking...")
@@ -194,7 +194,7 @@ class NetworkTab(QWidget):
         )
         mc.addWidget(self.mdns_status_lbl)
 
-        self._mdns_host_row = _copy_row("Host", "pgops.test")
+        self._mdns_host_row = _copy_row("Host", "pgops.local")
         mc.addWidget(self._mdns_host_row)
 
         mdns_btns = QHBoxLayout()
@@ -214,11 +214,11 @@ class NetworkTab(QWidget):
         port = self.config["port"]
         self._mdns_conn_row = _copy_row(
             "Conn",
-            f"postgresql://user:pass@pgops.test:{port}/dbname"
+            f"postgresql://user:pass@pgops.local:{port}/dbname"
         )
         mc.addWidget(self._mdns_conn_row)
         mc.addWidget(_lbl(
-            "pgops.test broadcasts automatically on every launch.  "
+            "pgops.local broadcasts automatically on every launch.  "
             "Windows 10/11: native.  Older Windows: install Bonjour.  "
             "macOS/iOS: native.  Linux: avahi-daemon.  Android: usually works.",
             C_TEXT3, 11
@@ -344,7 +344,7 @@ class NetworkTab(QWidget):
 
     def update_mdns_status(self, is_running, ip=""):
         if is_running:
-            self.mdns_status_lbl.setText(f"BROADCASTING  pgops.test  →  {ip}")
+            self.mdns_status_lbl.setText(f"BROADCASTING  pgops.local  →  {ip}")
             self.mdns_status_lbl.setStyleSheet(
                 f"color:{C_GREEN};font-size:13px;font-weight:700;background:transparent;"
             )

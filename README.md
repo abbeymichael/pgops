@@ -1,1107 +1,574 @@
+# PGOps
 
+**Portable PostgreSQL + Web App Platform for Windows & macOS**
 
-
-<img width="1600" height="1280" alt="dashboard" src="https://github.com/user-attachments/assets/f574541f-e0f6-4da5-8431-fb340ee61f32" />
-
-<img width="1600" height="1471" alt="screen" src="https://github.com/user-attachments/assets/903f8817-0174-40c3-a751-08ddd05be91b" />
-
-<img width="1600" height="1292" alt="activity" src="https://github.com/user-attachments/assets/db1cfb72-df5e-48ff-b173-54cb4dddc63e" />
-
-# PGOps — Documentation
-**PGOps** is a portable, self-contained server management application for Windows and macOS.
-It provides a local area network (LAN) infrastructure layer for desktop and web applications
-built with frameworks like Laravel and NativePHP — handling database hosting, file storage,
-network discovery, SSL encryption, backups, and activity monitoring from a single interface.
-
-No cloud subscription. No internet dependency. No IT department required.
+PGOps is a self-contained desktop application that bundles PostgreSQL, MinIO object storage, pgAdmin 4, Caddy reverse proxy, and FrankenPHP into a single orchestration console. It's built for developers who need a full local server stack — with LAN access, mDNS discovery, TLS via mkcert, and one-click Laravel deployment — without touching system configuration files or running shell scripts.
 
 ---
 
 ## Table of Contents
 
-1. [What PGOps Is](#1-what-pgops-is)
-2. [System Requirements](#2-system-requirements)
-3. [Installation](#3-installation)
-4. [First Launch](#4-first-launch)
-5. [Security — App Password](#5-security--app-password)
-6. [Server Tab — PostgreSQL](#6-server-tab--postgresql)
-7. [Activity Monitor Tab](#7-activity-monitor-tab)
-8. [Databases Tab](#8-databases-tab)
-9. [Table Browser Tab](#9-table-browser-tab)
-10. [Backup & Restore Tab](#10-backup--restore-tab)
-11. [Files Tab — MinIO Object Storage](#11-files-tab--minio-object-storage)
-12. [Schedule Tab](#12-schedule-tab)
-13. [SSL / TLS Tab](#13-ssl--tls-tab)
-14. [Service Tab — Windows Service Mode](#14-service-tab--windows-service-mode)
-15. [Settings Tab](#15-settings-tab)
-16. [Network Tab](#16-network-tab)
-17. [Local Domain — pgops.test](#17-local-domain--pgopslocal)
-18. [Connecting Laravel Applications](#18-connecting-laravel-applications)
-19. [Connecting Other Frameworks](#19-connecting-other-frameworks)
-20. [Data Locations](#20-data-locations)
-21. [Building from Source](#21-building-from-source)
-22. [Deployment Scenarios](#22-deployment-scenarios)
-23. [Troubleshooting](#23-troubleshooting)
+- [What PGOps Does](#what-pgops-does)
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [First Launch](#first-launch)
+- [Running in Development Mode](#running-in-development-mode)
+- [Building for Distribution](#building-for-distribution)
+- [Architecture Overview](#architecture-overview)
+- [User Interface Guide](#user-interface-guide)
+- [CLI Tool](#cli-tool)
+- [Configuration Reference](#configuration-reference)
+- [Data and File Locations](#data-and-file-locations)
+- [Security](#security)
+- [Networking and DNS](#networking-and-dns)
+- [SSL / TLS with mkcert](#ssl--tls-with-mkcert)
+- [Scheduled Backups](#scheduled-backups)
+- [Windows Service Mode](#windows-service-mode)
+- [Deploying Laravel Apps](#deploying-laravel-apps)
+- [MinIO Object Storage](#minio-object-storage)
+- [Troubleshooting](#troubleshooting)
 
 ---
 
-## 1. What PGOps Is
+## What PGOps Does
 
-PGOps runs two servers on a single machine and makes them accessible to every device
-on the same network:
+PGOps manages every layer of a local development or small-production stack from a single GUI window:
 
-- **PostgreSQL 16** — relational database server (port 5432)
-- **MinIO** — S3-compatible object storage server (port 9000, console port 9001)
+**Infrastructure services** — PostgreSQL 16, MinIO S3 storage, pgAdmin 4, Caddy reverse proxy, FrankenPHP PHP server. Each starts, stops, and is monitored from the Server tab.
 
-Both are bundled as portable binaries. Neither requires a separate installation.
-Both are accessible via the hostname `pgops.test` which PGOps broadcasts
-automatically using mDNS — so connected apps never need a hardcoded IP address.
+**LAN discovery** — mDNS broadcasts `pgops.local` and every deployed app subdomain so any device on the same WiFi can connect with zero configuration.
 
-### Who it is for
+**TLS everywhere** — mkcert generates a locally trusted certificate authority. Once installed, all `*.pgops.local` domains are trusted in browsers on the host machine with no warnings. Client devices import the CA once.
 
-- Developers building Laravel or NativePHP desktop applications for small organisations
-- Teams that need a shared database and file storage on a local network
-- Organisations in low-connectivity environments where cloud services are unreliable
-- Any setup where a dedicated VM or mini PC acts as a local application server
+**Database management** — create isolated PostgreSQL databases, each with its own owner role. Browse tables and run SQL from a built-in editor. Live activity monitoring shows connections, cache hit ratios, TPS, and uptime.
 
-### What it is not
+**Object storage** — per-bucket MinIO access keys with scoped IAM-style policies. Public/private toggles, folder management, backup and restore.
 
-PGOps is not a replacement for production cloud infrastructure. It is designed for
-organisations with 1–20 concurrent users on a local network, where data stays on-premise
-and internet connectivity cannot be guaranteed.
+**App deployment** — provision and run Laravel apps in one wizard. Each app gets a database, a bucket, a generated `.env`, and a `*.pgops.local` subdomain served over HTTPS.
+
+**Backup scheduling** — automated pg_dump backups on hourly, daily, or weekly cadences with configurable retention.
 
 ---
 
-## 2. System Requirements
+## Requirements
 
-### Host machine (where PGOps runs)
+**Runtime**
+- Python 3.10 or later
+- PostgreSQL binaries are downloaded on first launch (~150 MB) if not bundled
 
-| Item | Requirement |
-|---|---|
-| OS | Windows 10/11 (64-bit) or macOS 11+ |
-| RAM | 2 GB minimum, 4 GB recommended |
-| Disk | 500 MB for binaries + space for your data |
-| Network | Ethernet or Wi-Fi — must be on the same network as client devices |
+**Python packages** (installed automatically by the run scripts)
 
-### Client devices (apps connecting to PGOps)
+```
+PyQt6>=6.6.0
+requests>=2.31.0
+qrcode>=7.4.2
+Pillow>=10.0.0
+pyinstaller>=6.3.0
+psycopg2-binary>=2.9.0
+zeroconf>=0.131.0
+cryptography>=42.0.0
+bcrypt>=4.0.0
+dnslib>=0.9.23
+GitPython>=3.1.40
+psutil>=5.9.0
+```
 
-- Any device on the same LAN or connected to the PGOps hotspot
-- No software installation required on clients
-- mDNS support required for `pgops.test` hostname resolution (see Section 17)
+**Build tools** (optional, for producing distributable packages)
+- Windows: Inno Setup 6 for a `Setup.exe` installer
+- macOS: Homebrew + `create-dmg` for a `.dmg` disk image
 
 ---
 
-## 3. Installation
+## Installation
 
 ### Windows
 
-1. Run `PGOps-Setup-1.0.0-Windows.exe`
-2. Follow the installer — no admin rights required for a user-level install
-3. Optional: tick "Start PGOps when Windows starts" for automatic launch
-4. Launch PGOps from the Start Menu or Desktop shortcut
-
-### macOS
-
-1. Open `PGOps-1.0.0-macOS.dmg`
-2. Drag `PGOps.app` to your Applications folder
-3. Launch from Applications
-
-### Building from source
-
-See Section 21.
-
----
-
-## 4. First Launch
-
-### Step 1 — Set your app password
-
-On the very first launch, PGOps shows a setup screen asking you to create a master password.
-This password protects access to the PGOps interface. It has nothing to do with your
-database or storage credentials. Minimum 4 characters.
-
-### Step 2 — Setup PostgreSQL binaries
-
-If PostgreSQL binaries are not bundled in your installer, the Server tab shows a
-"Setup PostgreSQL" button. Click it to download the portable PostgreSQL 16 binaries
-(approximately 150 MB, one time only). If binaries are bundled, this step is skipped.
-
-### Step 3 — Start the server
-
-Click **Start Server** on the Server tab. PGOps will:
-
-- Initialise the PostgreSQL cluster on first run
-- Configure it to listen on all network interfaces
-- Configure `pg_hba.conf` to allow LAN connections
-- Create the default database
-- Start broadcasting `pgops.test` on the network
-
-### Step 4 — Connect your apps
-
-Use the connection details shown on the Server tab. For new app-specific databases,
-go to the Databases tab and create a dedicated database with its own user.
-
----
-
-## 5. Security — App Password
-
-PGOps is protected by a master password shown on every launch.
-
-### Login screen
-
-Enter your password to unlock PGOps. After 5 incorrect attempts the error message
-updates to reflect the number of failures. The window shakes on wrong attempts.
-
-### Forgot password
-
-Click "Forgot password?" on the login screen. You will be shown the path to the
-`auth.json` file. Delete that file and relaunch PGOps — the setup screen appears
-again to create a new password. Your databases and files are not affected.
-
-**Windows path:**
-```
-%LOCALAPPDATA%\PGOps\auth.json
-```
-
-**macOS path:**
-```
-~/Library/Application Support/PGOps/auth.json
-```
-
-### Change password
-
-Go to **Settings → App Password → Change Password**. You must enter the current
-password before setting a new one.
-
-### How the password is stored
-
-Passwords are hashed using bcrypt (rounds=12) and stored in `auth.json`.
-The plaintext password is never written to disk.
-
----
-
-## 6. Server Tab — PostgreSQL
-
-The Server tab is the main control panel for PostgreSQL.
-
-### Controls
-
-| Button | Action |
-|---|---|
-| Start Server | Initialises (first run) and starts PostgreSQL |
-| Stop Server | Gracefully stops PostgreSQL using `pg_ctl stop -m fast` |
-| Setup PostgreSQL | Downloads or extracts portable binaries (one time) |
-
-### Connection details
-
-Once the server is running, the Server tab displays:
-
-| Field | Default | Description |
-|---|---|---|
-| Host | Your LAN IP | The IP address clients use to connect |
-| Port | 5432 | PostgreSQL port |
-| Username | postgres | Admin username |
-| Password | postgres | Admin password |
-| Database | mydb | Default database |
-| String | Full URL | Complete PostgreSQL connection string |
-
-Every field has a **Copy** button. The connection string format is:
-```
-postgresql://username:password@host:5432/database
-```
-
-### System tray
-
-Closing the PGOps window does not stop the server. PGOps minimises to the system tray
-and continues running. Double-click the tray icon to restore the window. Right-click
-for a menu with Start Server, Stop Server, and Quit options.
-
----
-
-## 7. Activity Monitor Tab
-
-The Activity Monitor shows live statistics about the running PostgreSQL server.
-It refreshes automatically every 5 seconds when the tab is visible and pauses
-when you switch to another tab to avoid unnecessary load.
-
-### Stat cards
-
-| Card | Description |
-|---|---|
-| Active Connections | Number of connections currently executing queries |
-| Total Databases | Number of user databases on this server |
-| Cache Hit Ratio | Percentage of data served from memory vs disk |
-| Uptime | Time since PostgreSQL was last started |
-| Transactions/s | Average transaction rate since last stats reset |
-
-### Active connections table
-
-Shows every current connection with:
-
-- **PID** — PostgreSQL process ID
-- **Database** — which database the connection is using
-- **User** — the role/user that connected
-- **Application** — application name reported by the client
-- **State** — connection state, colour-coded: green (active), amber (idle in transaction), grey (idle)
-- **Duration** — how long the current query has been running
-
-### Terminate connection
-
-Select a row and click **Terminate Selected Connection** to send `pg_terminate_backend()`
-to that process. A confirmation dialog appears first. The client application will receive
-a disconnection error.
-
-### Database sizes table
-
-Lists every database with its total size on disk, active connection count, and
-cache hit percentage. Cache hit is colour-coded: green (≥90%), amber (≥70%), red (<70%).
-A low cache hit ratio suggests the server needs more RAM.
-
----
-
-## 8. Databases Tab
-
-The Databases tab manages multiple PostgreSQL databases, each with its own owner
-username and password. This is the correct way to isolate different applications
-from each other — each app gets its own database and credentials.
-
-### Creating a database
-
-Click **New Database**. Fill in:
-
-- **Database Name** — the database identifier (no spaces)
-- **Owner Username** — the role that owns and controls this database
-- **Owner Password** — the password for that role (confirm it)
-
-PGOps creates the role (if it does not already exist), creates the database owned
-by that role, and grants full privileges including:
-
-- `GRANT ALL PRIVILEGES ON DATABASE` — connect and create objects
-- `GRANT ALL ON SCHEMA public` — access the public schema
-- `GRANT ALL ON ALL TABLES` — access existing tables
-- `GRANT ALL ON ALL SEQUENCES` — access sequences (required for auto-increment inserts)
-- `ALTER DEFAULT PRIVILEGES` — ensures future tables created by migrations are also accessible
-- `ALTER SCHEMA public OWNER TO` — full schema ownership
-
-This means Laravel migrations run as the admin user will produce tables that are
-immediately accessible to the app user — no manual `GRANT` statements needed.
-
-### Connection string format
-
-The Databases table shows a connection string for each database:
-```
-postgresql://owner:<password>@192.168.x.x:5432/database_name
-```
-
-Replace `<password>` with the owner's actual password.
-
-### Dropping a database
-
-Select a row and click **Drop Selected**. A confirmation dialog warns that this
-action is permanent. Active connections to the database are terminated before dropping.
-
-### Changing a password
-
-Select a row and click **Change Password**. Enter the new password twice to confirm.
-This runs `ALTER ROLE ... WITH PASSWORD` on the PostgreSQL server.
-
----
-
-## 9. Table Browser Tab
-
-The Table Browser provides a graphical interface for browsing and querying any database
-on the server. All database operations run in background threads — the UI never freezes.
-
-### Connecting
-
-Select a database from the dropdown and click **Connect**. PGOps connects using the
-admin credentials from Settings. Once connected, the schema tree loads automatically.
-
-### Schema tree
-
-The left panel shows all schemas in the selected database, with tables and views
-grouped separately. Click any table or view to load its data.
-
-### Data grid
-
-- Displays the first 100 rows by default
-- **Prev / Next** buttons paginate through large tables
-- Row count and total are shown in the bottom bar
-- NULL values are displayed in grey italic
-
-### SQL runner
-
-The bar at the top accepts any SQL query. Press Enter or click **Run** to execute.
-Results appear in the data grid. For non-SELECT statements (INSERT, UPDATE, DELETE,
-CREATE, etc.) the affected row count is shown. Errors appear as a red message in the grid.
-
-Clicking a table in the schema tree pre-fills the SQL bar with `SELECT * FROM table`.
-
-### Refresh Schema
-
-Click **Refresh Schema** to reload the schema tree after running migrations or
-making structural changes.
-
----
-
-## 10. Backup & Restore Tab
-
-### Backup
-
-PGOps uses `pg_dump` in custom format (`.dump` files) which are compressed and
-support selective restore.
-
-1. Select a database from the dropdown
-2. Optionally change the destination folder (default: `%LOCALAPPDATA%\PGOps\backups\`)
-3. Click **Backup Now**
-
-The backup button is disabled during the operation to prevent double-triggers.
-A progress bar shows the operation status. The backup file is named:
-```
-databasename_YYYYMMDD_HHMMSS.dump
-```
-
-### Restore
-
-1. Select a backup from the list (sorted newest first) or click **Open File** to browse
-2. Enter the target database name (existing or new — PGOps creates it if needed)
-3. Click **Restore Selected Backup**
-
-Restore uses `pg_restore` with `--clean` (drops existing objects before restoring)
-and `--no-owner` (objects are owned by the restoring user).
-
-A confirmation dialog appears before restore begins. The restore button is disabled
-during the operation.
-
-### Backup list
-
-The list shows all `.dump` files in the backup directory with filename, size in MB,
-and creation timestamp, sorted newest first.
-
----
-
-## 11. Files Tab — MinIO Object Storage
-
-PGOps includes MinIO, an S3-compatible object storage server. Laravel applications
-use the standard `s3` filesystem driver — no custom code required.
-
-### Ports
-
-| Service | Port | Purpose |
-|---|---|---|
-| MinIO API | 9000 | File operations (S3 protocol) |
-| MinIO Console | 9001 | Web-based admin interface |
-
-### Starting the storage server
-
-Click **Start Storage** in the Files tab header. MinIO starts automatically alongside
-PostgreSQL when you click Start Server on the Server tab (if binaries are available).
-
-If MinIO binaries are not installed, click **Download MinIO** to fetch them. You can
-also bundle `minio.exe` and `mc.exe` in the `assets/` folder before building to avoid
-the download entirely.
-
-### Web Console
-
-Click **Open Web Console** to open the MinIO admin interface in your browser at
-`http://pgops.test:9001`. Log in with the admin username and password from Settings
-(default: `postgres` / `postgres`).
-
-### Creating a bucket
-
-Click **New Bucket**. Fill in:
-
-- **Bucket Name** — lowercase, 3–63 characters, hyphens allowed, no spaces
-- **App / Label** — optional prefix for the generated access key
-
-PGOps automatically:
-
-1. Creates the bucket
-2. Generates a unique access key ID and secret key
-3. Creates a bucket-scoped IAM policy that restricts this key to this bucket only
-4. Attaches the policy to the access key
-
-A credentials dialog appears immediately showing:
-
-- Bucket name
-- Access Key ID
-- Secret Key (shown once — save it now)
-- Full Laravel `.env` block ready to copy and paste
-
-**The secret key cannot be retrieved after this dialog closes.** Use Rotate Keys
-to generate new credentials if you lose the secret.
-
-### Bucket isolation
-
-Each bucket's access key is restricted by an IAM policy to that bucket only.
-An app using bucket `app1-files` cannot read or write to `app2-files`, even if it
-has the correct endpoint and port.
-
-### Rotate Keys
-
-Select a bucket and click **Rotate Keys**. The old access key is immediately deleted
-and new credentials are generated. A credentials dialog shows the new key and secret.
-Update your Laravel `.env` files after rotating.
-
-### Drop Bucket
-
-Select a bucket and click **Drop Selected**. This permanently deletes:
-
-- All files in the bucket
-- The bucket itself
-- The associated access key and policy
-
-A confirmation dialog warns that this is irreversible.
-
-### Backup a bucket
-
-Select a bucket and click **Backup Bucket**. Choose a destination folder.
-PGOps uses `mc mirror` to copy all files to a local directory named after the bucket.
-
-### Laravel configuration
-
-After creating a bucket, add this to your Laravel `.env`:
-
-```env
-FILESYSTEM_DISK=s3
-AWS_ACCESS_KEY_ID=your_access_key
-AWS_SECRET_ACCESS_KEY=your_secret_key
-AWS_DEFAULT_REGION=us-east-1
-AWS_BUCKET=your-bucket-name
-AWS_ENDPOINT=http://pgops.test:9000
-AWS_USE_PATH_STYLE_ENDPOINT=true
-```
-
-And ensure your `config/filesystems.php` has the `s3` disk configured (it does by default
-in all Laravel installations).
-
-Files stored via `Storage::put()`, `Storage::disk('s3')->put()`, or any standard
-Laravel storage call will be saved to MinIO and accessible to all devices on the network.
-
----
-
-## 12. Schedule Tab
-
-The Schedule tab configures automatic backups that run in the background without
-any user interaction.
-
-### Configuration
-
-| Setting | Options | Description |
-|---|---|---|
-| Enable | On/Off | Master switch for scheduled backups |
-| Frequency | Hourly, Daily, Weekly | How often backups run |
-| At time | HH:MM | Time of day for daily/weekly backups |
-| Day | Monday–Sunday | Day of week for weekly backups |
-| Keep last N | 1–365 | Number of backups to retain per database |
-
-### Database selection
-
-The database list shows all current databases with a checkbox. Only checked databases
-are included in scheduled backups.
-
-### Pruning
-
-After each scheduled backup, PGOps automatically deletes the oldest backup files
-for each database, keeping only the most recent N copies as configured.
-
-### Next run
-
-The Schedule tab and the 3-second poll timer both display the calculated next run time
-based on the current schedule configuration.
-
-### Background operation
-
-The scheduler runs in a daemon thread. It checks every 60 seconds whether a backup
-is due. It does not wake the machine from sleep — if the machine is asleep at the
-scheduled time, that backup is skipped and the next one runs on schedule.
-
----
-
-## 13. SSL / TLS Tab
-
-PGOps can encrypt all database connections on the LAN using TLS.
-
-### Certificate generation
-
-Click **Generate New Certificate**. PGOps uses the `cryptography` Python library
-to create a self-signed RSA 2048-bit certificate valid for 10 years. The certificate
-covers:
-
-- `pgops.test`
-- `localhost`
-- `pgops`
-- `127.0.0.1`
-- Your current LAN IP at the time of generation
-- `192.168.137.1` (hotspot IP)
-
-The certificate is saved to `%LOCALAPPDATA%\PGOps\ssl\server.crt` and the private
-key to `server.key`.
-
-### Enabling SSL
-
-Click **Enable SSL**. PGOps copies the certificate and key into the PostgreSQL data
-directory and updates `postgresql.conf` with:
-
-```
-ssl = on
-ssl_cert_file = 'server.crt'
-ssl_key_file  = 'server.key'
-```
-
-**Restart the server after enabling SSL** for the change to take effect.
-
-### Disabling SSL
-
-Click **Disable SSL**. PGOps sets `ssl = off` in `postgresql.conf`. Restart the
-server to apply.
-
-### Exporting the certificate
-
-Click **Export server.crt** to save a copy of the certificate to any location.
-Distribute this file to client machines that use `sslmode=verify-ca` — they need
-the certificate to verify the server's identity.
-
-### Connecting with SSL
-
-| sslmode | Behaviour |
-|---|---|
-| `require` | Encrypts the connection, does not verify the certificate |
-| `verify-ca` | Encrypts and verifies the certificate (requires server.crt on client) |
-
-For most LAN deployments, `sslmode=require` is sufficient.
-
-**Laravel `.env`:**
-```env
-DB_SSLMODE=require
-```
-
-**psycopg2 (Python):**
-```python
-psycopg2.connect(..., sslmode='require')
-```
-
-**Connection URL:**
-```
-postgresql://user:pass@pgops.test:5432/dbname?sslmode=require
-```
-
----
-
-## 14. Service Tab — Windows Service Mode
-
-By default, PGOps requires someone to be logged in and the app to be running
-for the database to be available. Service Mode removes this requirement.
-
-### What service mode does
-
-Registering PostgreSQL as a Windows service means it:
-
-- Starts automatically when the PC boots, before anyone logs in
-- Continues running after users log out
-- Is managed by Windows Service Control Manager (SCM)
-- Survives PGOps being closed entirely
-
-This is the recommended mode for dedicated VMs and mini PCs acting as servers.
-
-### Installing the service
-
-**Requires running PGOps as Administrator.**
-
-Click **Install Service**. PGOps runs `pg_ctl register` to register the service as
-`PGOps-PostgreSQL` with automatic startup. The service display name is
-`PGOps PostgreSQL Server`.
-
-If you are not running as Administrator, a warning explains how to relaunch with
-the required privileges.
-
-### Service controls
-
-| Button | Action |
-|---|---|
-| Install Service | Registers PostgreSQL as a Windows auto-start service |
-| Remove Service | Stops and unregisters the service |
-| Start Service | Starts the service via `sc start` |
-| Stop Service | Stops the service via `sc stop` |
-
-### Service vs app mode
-
-| Mode | Best for |
-|---|---|
-| App mode (tray icon) | Personal PCs where someone is always logged in |
-| Service mode | Dedicated VMs, mini PCs, always-on server machines |
-
-When running as a service, PGOps is still useful for administration — the database
-keeps running even when you close the PGOps window entirely.
-
----
-
-## 15. Settings Tab
-
-### Server configuration
-
-| Setting | Default | Description |
-|---|---|---|
-| Admin Username | postgres | PostgreSQL superuser username |
-| Admin Password | postgres | PostgreSQL superuser password |
-| Default Database | mydb | Database created on first start |
-| Port | 5432 | PostgreSQL listening port |
-| Auto-start | Off | Start PostgreSQL automatically when PGOps opens |
-
-**Important:** Changing admin credentials requires stopping the server and deleting
-the `pgdata/` folder to reinitialise the cluster. Existing data will be lost unless
-you back it up first.
-
-### App password
-
-The Change Password section lets you update the master password used to unlock PGOps.
-You must enter the current password before setting a new one.
-
----
-
-## 16. Network Tab
-
-### Available network interfaces
-
-PGOps scans all network adapters using `ipconfig` (Windows) or `ifconfig` (macOS)
-and lists every available IPv4 address with its adapter name and type:
-
-| Type | Colour | Description |
-|---|---|---|
-| Hotspot (fixed) | Green | Windows Mobile Hotspot — always 192.168.137.1 |
-| Ethernet LAN | Blue | Wired connection |
-| Wi-Fi | Purple | Wireless connection |
-| Loopback | Grey | 127.0.0.1 — local only |
-
-### Pinning an IP
-
-By default, PGOps auto-detects the best IP to use as the database host (hotspot > LAN > Wi-Fi).
-If your network setup causes the IP to change frequently, select a row and click
-**Pin Selected** to lock the host IP. This pinned value is saved to config and used
-in all connection strings.
-
-Click **Auto-detect** to remove the pin and return to automatic selection.
-
-### Why pin the hotspot IP
-
-When using Windows Mobile Hotspot, the hotspot adapter always gets `192.168.137.1`.
-This IP never changes. Pinning it means your apps always connect to the same address
-regardless of what other network changes occur on the host machine.
-
-### WiFi Hotspot
-
-PGOps can create a Windows Mobile Hotspot so other devices can connect directly
-to the host machine without a router.
-
-1. Enter an SSID (network name) and password (minimum 8 characters)
-2. Click **Start Hotspot**
-
-PGOps uses the Windows Runtime (WinRT) API via PowerShell. If this fails on your
-hardware, click **Open Settings** to open the Windows Mobile Hotspot settings page
-directly where you can configure it manually.
-
-Once the hotspot is active, connecting devices can reach the database at `192.168.137.1:5432`.
-Pin this IP in PGOps for a permanently stable connection string.
-
-### Firewall
-
-For clients on a regular LAN (not hotspot) to connect, Windows Firewall must allow
-inbound connections on port 5432. The Network tab shows the exact command to run
-once as Administrator:
-
-```cmd
-netsh advfirewall firewall add rule name="PGOps" dir=in action=allow protocol=TCP localport=5432
-```
-
-A Copy button is provided.
-
----
-
-## 17. Local Domain — pgops.test
-
-PGOps broadcasts `pgops.test` on the network using mDNS (Multicast DNS, also known
-as Zeroconf or Bonjour). This means any device on the same LAN or hotspot can resolve
-`pgops.test` to the host machine's current IP address — automatically, without any
-DNS server or manual configuration.
-
-### Why this matters
-
-Without mDNS, your apps must use an IP address as the database host. If that IP
-changes (DHCP lease renewal, network change, different router), all apps break.
-
-With `pgops.test`, the hostname never changes. Your apps use:
-
-```
-host = pgops.test
-```
-
-...and it always works, regardless of what IP the host machine currently has.
-
-### Broadcast lifecycle
-
-- mDNS starts broadcasting 500ms after PGOps opens — before the server even starts
-- It continues broadcasting regardless of whether PostgreSQL is running or stopped
-- It only stops when PGOps quits entirely
-- Clicking **Stop Broadcasting** shows a warning because stopping it breaks all connected apps
-
-### Platform support
-
-| Platform | Support | Notes |
-|---|---|---|
-| Windows 10/11 | Native | Built-in mDNS — no setup needed |
-| Windows 7/8 | Requires Bonjour | Install from Apple (free) |
-| macOS | Native | Built-in |
-| iOS | Native | Built-in |
-| Android | Usually works | Most modern apps support mDNS |
-| Linux | Requires avahi | `sudo apt install avahi-daemon` |
-
-### Testing resolution
-
-Click **Test Resolution** in the Network tab to verify that `pgops.test` resolves
-correctly from the host machine itself.
-
-### MinIO over mDNS
-
-MinIO is also accessible at `pgops.test:9000` (API) and `pgops.test:9001` (console).
-Use `pgops.test` as the endpoint in your Laravel `.env`:
-
-```env
-AWS_ENDPOINT=http://pgops.test:9000
-```
-
----
-
-## 18. Connecting Laravel Applications
-
-### Database connection
-
-```env
-DB_CONNECTION=pgsql
-DB_HOST=pgops.test
-DB_PORT=5432
-DB_DATABASE=your_database_name
-DB_USERNAME=your_database_owner
-DB_PASSWORD=your_database_password
-DB_SSLMODE=require
-```
-
-Enable the PostgreSQL PHP extension if not already active:
-
-In `php.ini` (Laragon: Menu → PHP → php.ini):
-```ini
-extension=pdo_pgsql
-extension=pgsql
-```
-
-Restart your web server after enabling the extension.
-
-### File storage connection
-
-```env
-FILESYSTEM_DISK=s3
-AWS_ACCESS_KEY_ID=your_bucket_access_key
-AWS_SECRET_ACCESS_KEY=your_bucket_secret_key
-AWS_DEFAULT_REGION=us-east-1
-AWS_BUCKET=your_bucket_name
-AWS_ENDPOINT=http://pgops.test:9000
-AWS_USE_PATH_STYLE_ENDPOINT=true
-```
-
-No changes to application code are needed. All `Storage::` calls work as normal.
-
-### NativePHP desktop applications
-
-NativePHP applications run as local processes. They connect to PGOps over the LAN
-exactly like any other app — using `pgops.test` as the host. This works whether
-the NativePHP app is running on the same machine as PGOps or on a different machine.
-
-### Running migrations
-
-```bash
-php artisan migrate
-```
-
-Migrations run as the admin user (connecting via `pgops.test`) and create tables in
-your app's database. The app user has full privileges on all tables created by migrations
-including existing and future ones.
-
----
-
-## 19. Connecting Other Frameworks
-
-### Node.js (pg / node-postgres)
-
-```javascript
-const { Pool } = require('pg')
-const pool = new Pool({
-  host:     'pgops.test',
-  port:     5432,
-  database: 'your_database',
-  user:     'your_user',
-  password: 'your_password',
-  ssl:      { rejectUnauthorized: false }  // for sslmode=require
-})
-```
-
-### Python (psycopg2)
-
-```python
-import psycopg2
-conn = psycopg2.connect(
-    host='pgops.test',
-    port=5432,
-    dbname='your_database',
-    user='your_user',
-    password='your_password',
-    sslmode='require'
-)
-```
-
-### Python (SQLAlchemy)
-
-```python
-engine = create_engine(
-    'postgresql://your_user:your_password@pgops.test:5432/your_database'
-    '?sslmode=require'
-)
-```
-
-### .NET / Entity Framework
-
-```csharp
-"ConnectionStrings": {
-  "DefaultConnection": "Host=pgops.test;Port=5432;Database=your_database;
-                        Username=your_user;Password=your_password;SSL Mode=Require"
-}
-```
-
-### File storage (any S3-compatible client)
-
-```
-Endpoint:  http://pgops.test:9000
-AccessKey: your_access_key
-SecretKey: your_secret_key
-Bucket:    your_bucket_name
-PathStyle: true
-Region:    us-east-1 (any value works)
-```
-
----
-
-## 20. Data Locations
-
-All mutable data is stored in a user-writable directory — never inside Program Files.
-
-### Windows
-
-| Data | Path |
-|---|---|
-| PostgreSQL binaries | `%LOCALAPPDATA%\PGOps\pgsql\` |
-| PostgreSQL data | `%LOCALAPPDATA%\PGOps\pgdata\` |
-| PostgreSQL log | `%LOCALAPPDATA%\PGOps\postgres.log` |
-| MinIO binaries | `%LOCALAPPDATA%\PGOps\minio-bin\` |
-| MinIO data | `%LOCALAPPDATA%\PGOps\minio-data\` |
-| Backup files | `%LOCALAPPDATA%\PGOps\backups\` |
-| SSL certificates | `%LOCALAPPDATA%\PGOps\ssl\` |
-| Configuration | `%LOCALAPPDATA%\PGOps\config.json` |
-| Schedule | `%LOCALAPPDATA%\PGOps\backup_schedule.json` |
-| Auth | `%LOCALAPPDATA%\PGOps\auth.json` |
-
-### macOS
-
-Replace `%LOCALAPPDATA%\PGOps\` with `~/Library/Application Support/PGOps/`.
-
-### Resetting a database cluster
-
-To start fresh (all data will be lost):
-
-1. Stop the server
-2. Delete `%LOCALAPPDATA%\PGOps\pgdata\`
-3. Start the server — a new cluster is initialised automatically
-
-### Uninstalling
-
-The PGOps uninstaller removes the application files from Program Files but does
-**not** delete your data directory. A message informs you of the data location
-so you can delete it manually if desired.
-
----
-
-## 21. Building from Source
-
-### Prerequisites
-
-- Python 3.11 or later
-- pip
-
-### Development run (no build)
-
-**Windows:**
-```cmd
+**Pre-built installer** — download `PGOps-Setup-x.x.x-Windows.exe` and run it. No administrator rights required for a per-user install.
+
+**From source:**
+```bat
+git clone https://github.com/yourname/pgops.git
+cd pgops
 run_dev.bat
 ```
 
-**macOS:**
-```bash
-chmod +x run_dev.sh && ./run_dev.sh
-```
-
-### Install dependencies manually
+### macOS
 
 ```bash
-pip install -r requirements.txt
+git clone https://github.com/yourname/pgops.git
+cd pgops
+chmod +x run_dev.sh
+./run_dev.sh
 ```
 
-Dependencies:
-- `PyQt6` — desktop GUI
-- `psycopg2-binary` — PostgreSQL connections (Table Browser, Activity Monitor)
-- `zeroconf` — mDNS broadcasting
-- `cryptography` — SSL certificate generation
-- `bcrypt` — password hashing
-- `requests` — binary downloads
-- `pyinstaller` — packaging
+### From the .app bundle
 
-### Building a Windows installer
+Double-click `PGOps.app`. On first launch macOS may show a Gatekeeper prompt — right-click the app and choose Open to proceed.
 
-**Prerequisites:**
-- Inno Setup 6 (jrsoftware.org/isinfo.php) — for the Setup.exe wrapper
+---
 
-```cmd
+## First Launch
+
+**Step 1 — Create a master password.** PGOps shows a setup screen on the very first launch. This password protects the interface and is stored as a bcrypt hash on disk. It has nothing to do with your database credentials.
+
+**Step 2 — Set up PostgreSQL binaries.** Click **Setup PostgreSQL** on the Server tab. PGOps downloads and extracts the PostgreSQL 16 binaries to your app data directory. This takes about a minute and only happens once.
+
+**Step 3 — Start the server.** Click **▶ START SERVER**. On first start, PGOps initialises a new cluster with these defaults:
+
+| Field | Default |
+|-------|---------|
+| Host | your LAN IP or `pgops.local` |
+| Port | 5432 |
+| Username | `postgres` |
+| Password | `postgres` |
+| Database | `mydb` |
+
+Change these in **Settings** before the first start if you want different values. Changing credentials after initialisation requires deleting the `pgdata` folder.
+
+**Step 4 — Connect.** Copy the connection URI from the Server tab. Or open `pgops.local:5432` directly from your database client.
+
+---
+
+## Running in Development Mode
+
+**Windows**
+```bat
+run_dev.bat
+```
+
+**macOS / Linux**
+```bash
+./run_dev.sh
+```
+
+Both scripts run `pip install -r requirements.txt` and launch `main.py`. All data writes to the same app data directory regardless of whether you run from source or a packaged build.
+
+---
+
+## Building for Distribution
+
+### Windows
+
+```bat
 build_windows.bat
 ```
 
-Output: `dist\installer\PGOps-Setup-1.0.0-Windows.exe`
+Output:
+- `dist\PGOps\PGOps.exe` — portable build
+- `dist\installer\PGOps-Setup-1.0.0-Windows.exe` — Inno Setup installer (if Inno Setup is installed)
 
-### Building a macOS DMG
+To bundle PostgreSQL binaries so users skip the download step, place the Windows binary ZIP from EnterpriseDB at `assets\pg_windows.zip` before building.
 
-**Prerequisites:**
-- Homebrew
-- `brew install create-dmg`
-
-```bash
-chmod +x build_mac.sh && ./build_mac.sh
-```
-
-Output: `dist/installer/PGOps-1.0.0-macOS.dmg`
-
-### Bundling binaries (recommended)
-
-To avoid requiring an internet connection on first launch, place these files
-in `assets/` before building:
-
-| File | Source |
-|---|---|
-| `assets/pg_windows.zip` | enterprisedb.com/download-postgresql-binaries — Windows x86-64 zip |
-| `assets/pg_mac.zip` | enterprisedb.com/download-postgresql-binaries — macOS zip |
-| `assets/minio.exe` | dl.min.io/server/minio/release/windows-amd64/minio.exe |
-| `assets/mc.exe` | dl.min.io/client/mc/release/windows-amd64/mc.exe |
-| `assets/minio` | dl.min.io/server/minio/release/darwin-amd64/minio |
-| `assets/mc` | dl.min.io/client/mc/release/darwin-amd64/mc |
-
----
-
-## 22. Deployment Scenarios
-
-### Scenario A — Dedicated mini PC or VM (recommended)
-
-A single low-cost machine (Intel NUC, Raspberry Pi 5, or VM) runs PGOps with
-Service Mode enabled. It stays on 24/7 and serves all devices on the LAN.
-
-Setup:
-1. Install PGOps
-2. Set a static LAN IP on the machine (e.g. 192.168.1.10)
-3. Pin that IP in the Network tab
-4. Enable Windows Service Mode
-5. Enable SSL
-6. All apps connect to `pgops.test:5432`
-
-### Scenario B — Developer laptop, no router
-
-A developer's laptop acts as the host. Other devices connect via Windows Mobile Hotspot.
-
-Setup:
-1. Start PGOps
-2. Enable hotspot from the Network tab (SSID: PGOps-Net)
-3. Other devices connect to PGOps-Net WiFi
-4. Pin `192.168.137.1` in the Network tab
-5. All apps connect to `pgops.test:5432` or `192.168.137.1:5432`
-
-### Scenario C — Existing LAN with router
-
-All devices are already on the same router. PGOps runs on one machine.
-
-Setup:
-1. Run the firewall command from the Network tab once as Administrator
-2. Apps connect to `pgops.test:5432` — mDNS handles IP resolution automatically
-
----
-
-## 23. Troubleshooting
-
-### App won't start — "PostgreSQL binaries not found"
-
-Click **Setup PostgreSQL** on the Server tab. If you have no internet, place the
-PostgreSQL zip in `assets/pg_windows.zip` (Windows) or `assets/pg_mac.zip` (macOS)
-and re-run setup.
-
-### Can't connect from another machine
-
-1. Run the firewall command from the Network tab as Administrator
-2. Verify both machines are on the same network
-3. Try connecting to the IP address directly instead of `pgops.test`
-4. If using hotspot: ensure the client device joined the correct hotspot network
-
-### pgops.test doesn't resolve on Windows clients
-
-Windows 10/11 has built-in mDNS. If it still fails:
-- Install Bonjour from Apple (free, used by iTunes)
-- Or connect using the IP address shown in the Network tab instead
-
-### pgops.test doesn't resolve on Linux clients
+### macOS
 
 ```bash
-sudo apt install avahi-daemon
-sudo systemctl enable avahi-daemon
-sudo systemctl start avahi-daemon
+./build_mac.sh
 ```
 
-### "Permission denied for table" errors
+Output:
+- `dist/PGOps.app` — app bundle
+- `dist/installer/PGOps-1.0.0-macOS.dmg` — drag-to-install image (requires `create-dmg`)
 
-This means the database user does not have access to the tables. This happens
-with databases created by older versions of PGOps. Fix by running in psql
-as the admin user (connected to the affected database):
+To bundle PostgreSQL for macOS, place the binary ZIP at `assets/pg_mac.zip`.
 
-```sql
-GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO "your_user";
-GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO "your_user";
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO "your_user";
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO "your_user";
-```
+### CLI binary
 
-Databases created by PGOps v6 and later have these grants applied automatically.
-
-### MinIO won't start
-
-Ensure `minio.exe` is present in `%LOCALAPPDATA%\PGOps\minio-bin\`.
-Click **Download MinIO** on the Files tab to fetch it.
-
-### Forgot app password
-
-Delete `%LOCALAPPDATA%\PGOps\auth.json` and relaunch PGOps.
-The setup screen appears to create a new password.
-Databases and files are not affected.
-
-### Server stops unexpectedly
-
-Check `%LOCALAPPDATA%\PGOps\postgres.log` for PostgreSQL error details.
-Common causes: disk full, port conflict, or the machine went to sleep.
-
-### Port 5432 already in use
-
-Another PostgreSQL instance may be running. Change the port in Settings
-(e.g. to 5433) and restart the server. Update all app connection strings accordingly.
+`pgops.spec` builds a separate `pgops` CLI executable. It is included automatically in both build scripts.
 
 ---
 
-*PGOps is built with Python, PyQt6, PostgreSQL 16, and MinIO.*
-*It is designed for local network deployments in small organisations.*
+## Architecture Overview
+
+```
+PGOps Desktop Application
+├── PostgreSQL 16          — pg_ctl / initdb / psql via subprocess
+├── MinIO                  — child process, mc CLI for bucket management
+├── pgAdmin 4              — child process via the bundled Python runtime
+├── Caddy                  — reverse proxy, Caddyfile regenerated per deploy
+├── FrankenPHP             — one process per deployed app
+├── MDNSServer             — zeroconf, publishes pgops.local + app subdomains
+├── LandingServer          — stdlib HTTP on port 8080, Caddy proxies it
+├── APIServer              — stdlib HTTP on 127.0.0.1:7420 for the CLI
+└── BackupScheduler        — daemon thread, pg_dump on a cron-like schedule
+```
+
+**Source layout**
+
+```
+main.py                     Entry point, auth gate, window launch
+pgops_cli.py                CLI tool
+pgops.spec                  PyInstaller spec for app + CLI
+requirements.txt
+
+src/core/                   Business logic (no Qt imports)
+  auth.py                   Master password hashing and verification
+  config.py                 Settings load / save
+  pg_manager.py             PostgreSQL binary setup and cluster lifecycle
+  db_manager.py             Database and role operations
+  minio_manager.py          MinIO binary management and server control
+  bucket_manager.py         MinIO bucket / access-key operations via mc
+  pgadmin_manager.py        pgAdmin 4 process lifecycle
+  caddy_manager.py          Caddyfile generation and Caddy process control
+  frankenphp_manager.py     FrankenPHP binary setup and per-app processes
+  app_manager.py            App registry, provisioning, git pull, deletion
+  api_server.py             Internal REST API (127.0.0.1:7420)
+  landing_server.py         pgops.local root landing page
+  mdns_server.py            mDNS broadcaster (replaces old DNS server)
+  dns_server.py             Hosts-file fallback utilities
+  mdns.py                   Legacy mDNS broadcaster (PostgreSQL service record)
+  network_info.py           Network interface discovery
+  hotspot.py                Windows Mobile Hotspot via WinRT / PowerShell
+  scheduler.py              Automated backup scheduler
+  service_manager.py        Windows Service registration
+  ssl_manager.py            mkcert cert management, postgresql.conf SSL config
+  mkcert_manager.py         mkcert binary download, CA install, cert generation
+  ip_watcher.py             Background thread that watches for LAN IP changes
+
+src/ui/                     Qt6 interface
+  main_window.py            Root window, wires everything together
+  sidebar.py                Navigation sidebar
+  header_bar.py             Top header bar
+  login_dialog.py           Login, setup, and password-change dialogs
+  tab_server.py             Server controls and service cards
+  tab_activity.py           Live activity dashboard
+  tab_databases.py          Database list, table browser, SQL runner
+  tab_apps.py               Laravel app deployment and management
+  tab_backup.py             Backup and restore UI
+  tab_schedule.py           Backup scheduler configuration
+  tab_ssl.py                SSL / TLS management
+  tab_service.py            Windows Service control
+  tab_network.py            Network interfaces, mDNS, hotspot
+  tab_dns.py                mDNS status and client setup instructions
+  tab_settings.py           App settings
+  tab_docs.py               In-app documentation (this tab)
+  files_tab.py              MinIO bucket management
+  activity_monitor.py       Legacy activity widget
+  table_browser.py          Legacy table browser widget
+  widgets.py                Shared UI components
+  theme.py                  Colour tokens and global stylesheet
+
+assets/                     Optional pre-bundled binaries
+  pg_windows.zip            PostgreSQL Windows binaries
+  pg_mac.zip                PostgreSQL macOS binaries
+  minio.exe / minio         MinIO server binary
+  mc.exe / mc               MinIO client binary
+  caddy.exe / caddy         Caddy binary
+  frankenphp binary         FrankenPHP binary
+```
+
+---
+
+## User Interface Guide
+
+Navigation is in the left sidebar. Upper group: main tools. Lower group: infrastructure and advanced settings.
+
+| Tab | What it does |
+|-----|--------------|
+| **Servers** | Start and stop PostgreSQL, MinIO, pgAdmin, Caddy, FrankenPHP. View connection details and live log output. |
+| **Activity** | Live dashboard: active connections, database sizes, cache hit ratio, transactions per second, server uptime. |
+| **Databases** | Create and drop isolated databases. Browse tables with pagination. Run arbitrary SQL. Change role passwords. |
+| **Apps** | Deploy and manage Laravel applications via the wizard. Start, stop, restart, pull, view logs, run Artisan commands. |
+| **Explorer** | Standalone SQL runner and schema browser for any database. |
+| **Storage** | MinIO bucket management: create, drop, rotate keys, toggle public/private, manage folders. |
+| **Settings** | Change PostgreSQL credentials, port, autostart preference, and app master password. |
+| **Backup** | Manual pg_dump backup and pg_restore restore. |
+| **Schedule** | Configure automated backup frequency, time, retention, and which databases to include. |
+| **SSL / TLS** | Run mkcert full setup, generate or regenerate certificates, enable/disable SSL on PostgreSQL, export the CA for client devices. |
+| **Service** | Register or remove PostgreSQL as a Windows background service. |
+| **Network** | View and pin network interfaces, control the legacy mDNS broadcaster, manage the Windows Mobile Hotspot. |
+| **DNS** | mDNS status, registered subdomains, hosts-file fallback injection, per-platform client setup instructions, QR code. |
+| **Log** | Full application log output. |
+| **Docs** | This documentation. |
+
+---
+
+## CLI Tool
+
+The `pgops` CLI communicates with a running PGOps instance over the internal API at `127.0.0.1:7420`. PGOps must be open for CLI commands to work.
+
+```bash
+# Check service status
+pgops status
+
+# List deployed apps
+pgops apps
+
+# Deploy from a ZIP archive
+pgops deploy --zip ./myapp.zip --name inventory --display "Inventory Manager"
+
+# Deploy from a Git repository
+pgops deploy --git https://github.com/org/app.git --name inventory --branch main
+
+# App lifecycle
+pgops start inventory
+pgops stop inventory
+pgops restart inventory
+pgops pull inventory        # git pull + migrate + restart
+pgops logs inventory --lines 200
+pgops delete inventory
+
+# Database management
+pgops db:create mydb myuser --password secret
+pgops db:list
+
+# Backup
+pgops backup mydb
+```
+
+---
+
+## Configuration Reference
+
+Settings are stored in `config.json` in the app data directory and are editable through the Settings tab.
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `username` | `postgres` | PostgreSQL admin username |
+| `password` | `postgres` | PostgreSQL admin password |
+| `database` | `mydb` | Default database name |
+| `port` | `5432` | PostgreSQL port |
+| `autostart` | `false` | Start PostgreSQL when app opens |
+| `preferred_ip` | `""` | Pin the host IP (empty = auto-detect) |
+| `caddy_http_port` | `80` | Caddy HTTP port (needs admin if 80) |
+| `caddy_https_port` | `443` | Caddy HTTPS port (needs admin if 443) |
+| `landing_port` | `8080` | Landing page server port |
+| `minio_api_port` | `9000` | MinIO S3 API port |
+| `minio_console_port` | `9001` | MinIO web console port |
+| `pgadmin_port` | `5050` | pgAdmin internal port |
+
+**Changing credentials after first start** requires stopping the server and deleting the `pgdata` folder to reinitialise the cluster from scratch.
+
+---
+
+## Data and File Locations
+
+PGOps never writes to `Program Files` or the app bundle. All mutable data lives in:
+
+| Platform | Path |
+|----------|------|
+| Windows | `%LOCALAPPDATA%\PGOps\` |
+| macOS | `~/Library/Application Support/PGOps/` |
+
+Directory layout inside that folder:
+
+```
+config.json             App settings
+auth.json               Master password hash
+pgsql/                  PostgreSQL binaries
+pgdata/                 PostgreSQL cluster data directory
+postgres.log            PostgreSQL server log
+backups/                pg_dump backup files (.dump)
+backup_schedule.json    Scheduler configuration
+mkcert/                 mkcert binary
+certs/                  Generated TLS certificate and key
+minio-bin/              MinIO and mc binaries
+minio-data/             MinIO object storage data
+pgadmin4-data/          pgAdmin 4 database, sessions, logs
+caddy/                  Caddy binary, Caddyfile, data directory
+frankenphp/             FrankenPHP binary and per-app PHP ini files
+apps/                   Deployed app source files
+apps.json               App registry
+```
+
+**Uninstalling:** On Windows the uninstaller removes the application binaries but leaves the data directory intact so your databases and files survive. Delete `%LOCALAPPDATA%\PGOps` manually to remove everything.
+
+---
+
+## Security
+
+### Master Password
+
+The master password is hashed with bcrypt (12 rounds) if the `bcrypt` package is available, or PBKDF2-HMAC-SHA256 (300,000 iterations) as a fallback. The hash is stored in `auth.json` and never sent anywhere.
+
+After five failed login attempts, the error message prompts the user to use the Forgot Password flow, which explains how to delete `auth.json` to reset. Databases and stored data are unaffected by a password reset.
+
+### Database Credentials
+
+PostgreSQL is configured with `md5` authentication. The admin password is written to disk only temporarily as a `.pwfile` during `initdb`, and deleted immediately after. `pg_hba.conf` accepts connections from any IP by default to support LAN access — tighten this if needed.
+
+### MinIO Access Keys
+
+Each bucket gets a dedicated access key with an IAM-style policy scoped to that bucket only. Other buckets are unreachable with that key. Secret keys are shown once at creation time and are not stored by PGOps after that point.
+
+### Internal API
+
+The REST API used by the CLI binds exclusively to `127.0.0.1:7420` and is not reachable from the LAN.
+
+---
+
+## Networking and DNS
+
+### mDNS — Zero-Configuration LAN Discovery
+
+PGOps broadcasts `pgops.local` and every deployed app subdomain (`<app>.pgops.local`) using mDNS (Zeroconf/Bonjour). Any device on the same WiFi can reach the services with no DNS configuration.
+
+Platform support:
+- **Windows 10/11** — built-in mDNS support, no setup needed
+- **macOS / iOS** — native Bonjour, no setup needed
+- **Android 12+** — works in most browsers
+- **Linux** — requires `avahi-daemon` (`sudo apt install avahi-daemon`)
+- **Older Windows** — install Apple Bonjour from `support.apple.com/kb/DL999`
+
+### Hosts File Fallback
+
+If mDNS is blocked (corporate firewall, VPN), use the Inject Hosts File button in the DNS tab. This writes `pgops.local` and all app subdomains to the system hosts file on the PGOps machine only. Requires Administrator / sudo.
+
+### Windows Mobile Hotspot
+
+The Network tab can start and stop a Windows Mobile Hotspot using the WinRT API. When the hotspot is active, its fixed IP (`192.168.137.1`) is auto-detected and can be pinned so connection strings stay stable.
+
+### Firewall
+
+On Windows you may need to allow inbound TCP on the PostgreSQL port. The Network tab shows the exact `netsh` command:
+
+```
+netsh advfirewall firewall add rule name="PGOps" dir=in action=allow protocol=TCP localport=5432
+```
+
+---
+
+## SSL / TLS with mkcert
+
+PGOps uses [mkcert](https://github.com/FiloSottile/mkcert) to generate locally trusted TLS certificates.
+
+**How it works:** mkcert creates a local CA and installs it into the system trust store (Windows, macOS, Chrome, Firefox). Any certificate it issues is trusted automatically by browsers on the host machine — no warnings, no exceptions needed.
+
+**Setup:** Go to **SSL / TLS** and click **Full Setup (Download + Trust CA + Generate Cert)**. This downloads the mkcert binary, installs the CA, and generates a certificate covering:
+- `pgops.local` and `*.pgops.local`
+- `localhost` and `127.0.0.1`
+- All current LAN IPs
+
+**Other devices:** Export the CA certificate from the SSL tab and import it on each client device once. After import, all `*.pgops.local` domains are trusted on that device automatically. The SSL tab shows step-by-step instructions for Windows, macOS, Android, iOS, and Linux.
+
+**PostgreSQL TLS:** After generating the certificate, click **Enable SSL** on the SSL tab, then restart the server. Connect from clients with `sslmode=require`.
+
+**Caddy:** Uses the same mkcert certificate automatically. All HTTPS subdomains are trusted with no additional configuration.
+
+---
+
+## Scheduled Backups
+
+The Schedule tab configures automatic `pg_dump` backups running in a background thread.
+
+| Setting | Options |
+|---------|---------|
+| Frequency | Hourly, Daily, Weekly |
+| Time | HH:MM for daily / weekly |
+| Day of week | Monday – Sunday for weekly |
+| Keep last N | Number of backups to retain per database |
+| Databases | Per-database checkboxes |
+
+Backups are saved to the `backups/` folder in PostgreSQL custom format (`.dump`). They can be restored through the Backup tab or directly with `pg_restore`.
+
+---
+
+## Windows Service Mode
+
+The Service tab registers PostgreSQL as a Windows background service using `pg_ctl register`. In service mode, PostgreSQL starts at system boot before any user logs in.
+
+Requirements: PGOps must be run as Administrator to install or remove the service. The service is named `PGOps-PostgreSQL` and configured for automatic startup.
+
+---
+
+## Deploying Laravel Apps
+
+Apps are deployed through the Apps tab wizard.
+
+**What the wizard does:**
+1. Extracts the ZIP or clones the Git repository
+2. Creates an isolated PostgreSQL database and owner role
+3. Creates a MinIO bucket with a dedicated access key
+4. Writes a `.env` file with all connection details pre-filled
+5. Runs `php artisan key:generate`
+6. Runs `php artisan migrate --force`
+7. Starts a FrankenPHP process serving the app on an internal port
+8. Reloads Caddy to route `<slug>.pgops.local` to the app
+
+**Stack types:** The wizard supports Laravel (full provisioning), Static HTML (files only), and Other (files only, no PHP runtime).
+
+**PHP extension management:** Each app has its own `php.ini` generated at deploy time. Use the PHP button on the app row to manage which extensions are activated. Extensions compiled into FrankenPHP are always active; additional extensions can be loaded from `.so` / `.dll` files placed in the FrankenPHP extensions directory.
+
+**Artisan runner:** Click the Artisan button on any app row to open the Artisan console. Commands are grouped by category (Keys, Migrations, Seeding, Caches, Queue, Storage) with live streaming output. There is also a free-text custom command input.
+
+**Git pull:** If an app was deployed from a Git URL, the Pull button runs `git pull`, `artisan migrate`, and `artisan config:cache`, then restarts the app.
+
+**Deletion:** Deleting an app drops its database, drops its MinIO bucket, removes all source files, and removes the PHP ini configuration.
+
+**Laravel .env reference:**
+```env
+DB_CONNECTION=pgsql
+DB_HOST=pgops.local
+DB_PORT=5432
+DB_DATABASE=myapp_db
+DB_USERNAME=myapp_user
+DB_PASSWORD=<generated>
+
+FILESYSTEM_DISK=s3
+AWS_ACCESS_KEY_ID=<generated>
+AWS_SECRET_ACCESS_KEY=<generated>
+AWS_DEFAULT_REGION=us-east-1
+AWS_BUCKET=myapp-files
+AWS_ENDPOINT=https://minio.pgops.local
+AWS_USE_PATH_STYLE_ENDPOINT=true
+```
+
+---
+
+## MinIO Object Storage
+
+**Setup:** Click **Setup MinIO** on the Storage tab to download the MinIO and mc binaries. Then click **▶ Start Storage**.
+
+**Access URLs (via Caddy + mkcert):**
+- S3 API endpoint: `https://minio.pgops.local`
+- Web console: `https://console.pgops.local`
+
+Use the HTTPS Caddy URLs in `.env` files and connection strings. The raw internal HTTP URL (`http://127.0.0.1:9000`) is used only by the mc tool internally.
+
+**Bucket policies:** Each bucket can be Private (authenticated access only) or Public (anyone can download files via URL). Toggle the policy from the Storage tab.
+
+**Folder management:** Click the 📁 Folders button to create or delete key-prefix folders within a bucket. Deleting a folder removes all objects inside it.
+
+**Credential rotation:** Use Rotate Keys to invalidate the old access key and generate a new one. Update your Laravel `.env` after rotating.
+
+---
+
+## Troubleshooting
+
+**PostgreSQL fails to start**
+
+Check the Log tab. Common causes:
+- Port 5432 already in use. Change the port in Settings.
+- Corrupt `pgdata` folder. Stop the server, delete `pgdata/` in the app data directory, and restart (this reinitialises the cluster and erases all data).
+- Insufficient disk space.
+
+**pgAdmin shows a blank page or fails to load**
+
+Click **Reset & Restart** on the Server tab. This deletes the pgAdmin SQLite database and restarts fresh. Default login: `admin@pgops.com` / `pgopsadmin`.
+
+**pgops.local does not resolve on this machine**
+
+Run mDNS resolution test from the DNS tab. If it fails, try the Inject Hosts File button as a fallback. On Windows, check that the Windows Firewall allows UDP on port 5353.
+
+**pgops.local does not resolve on another device**
+
+Ensure both devices are on the same WiFi. mDNS may be blocked on some corporate or guest networks — in those cases, point the device's DNS server to the PGOps host IP using the instructions in the DNS tab.
+
+**Caddy or HTTPS not working**
+
+Check that the mkcert certificate exists (green status on the SSL tab). If Caddy is using its internal CA instead of mkcert, run Full Setup on the SSL tab and restart Caddy.
+
+**MinIO console shows a connection error in the browser**
+
+Use the direct Caddy HTTPS URL (`https://console.pgops.local`) rather than the raw port. Some browsers enforce HTTPS on `.local` domains via HSTS and refuse plain HTTP connections.
+
+**App deployment fails at artisan migrate**
+
+Check the Log tab for the artisan output. Common causes: the database was not created successfully, missing PHP extensions, or a missing `.env` value. Use the Artisan button to rerun `migrate --force` manually after fixing the issue.
+
+**Forgot master password**
+
+Delete `auth.json` from the app data directory and relaunch. You will be prompted to set a new password. All databases and files are preserved.
+
+**Windows: cmd window flashes briefly**
+
+This is suppressed via `CREATE_NO_WINDOW` on all subprocesses. If you see it on a particular action, report the specific operation.

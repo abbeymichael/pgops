@@ -1,16 +1,16 @@
 """
 tab_dns.py
-DNS Tab — unified DNS resolution management for pgops.test.
+Network Discovery tab — mDNS (Bonjour / Zeroconf) management for PGOps.
 
-Two resolution strategies:
-  1. Hosts File Injection  — reliable for local machine, zero network config
-  2. DNS Server            — serves all LAN devices if port 53 is available
+mDNS broadcasts pgops.local and every deployed app subdomain (<app>.pgops.local)
+on the LAN so that other devices can reach them with ZERO configuration — just
+connect to the same Wi-Fi.
 
-The tab makes it crystal clear which method is active and guides the user.
+Hosts-file injection is still offered as a local-machine fallback for
+environments where mDNS is blocked (corporate firewalls, VPNs, etc.).
 """
 
 import webbrowser
-import platform
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QFrame, QScrollArea, QTabWidget, QTextEdit, QApplication,
@@ -24,6 +24,8 @@ from ui.theme import (
     C_TEXT, C_TEXT2, C_TEXT3, C_BLUE, C_GREEN, C_RED, C_AMBER,
 )
 
+
+# ── Small helpers ──────────────────────────────────────────────────────────────
 
 def _btn(text, bg=C_BLUE, hover="#3b7de8", fg="white", h=34):
     b = QPushButton(text)
@@ -55,21 +57,10 @@ def _sep():
     return f
 
 
-def _status_pill(text, fg, bg):
-    l = QLabel(text)
-    l.setStyleSheet(
-        f"color:{fg};background:{bg};border:1px solid {fg}44;"
-        f"border-radius:4px;font-size:10px;font-weight:800;"
-        f"letter-spacing:1px;padding:3px 10px;"
-    )
-    return l
-
-
-def _make_qr_pixmap(url: str, size: int = 180) -> QPixmap:
+def _make_qr_pixmap(url: str, size: int = 180):
     try:
-        import qrcode
-        import io
-        qr = qrcode.make(url)
+        import qrcode, io
+        qr  = qrcode.make(url)
         buf = io.BytesIO()
         qr.save(buf, format="PNG")
         buf.seek(0)
@@ -83,15 +74,22 @@ def _make_qr_pixmap(url: str, size: int = 180) -> QPixmap:
         return None
 
 
+# ── Tab widget ─────────────────────────────────────────────────────────────────
+
 class DnsTab(QWidget):
     """
-    DNS / Resolution management tab.
-    Provides both hosts-file injection (local) and DNS server (LAN-wide).
+    mDNS / Network Discovery management tab.
+
+    Constructor parameters
+    ----------------------
+    mdns_server  — MDNSServer instance (from core.mdns_server)
+    get_host_ip  — callable() → str  (returns current LAN IP)
+    on_log       — optional callable(str)
     """
 
-    def __init__(self, dns_server, get_host_ip, on_log=None, parent=None):
+    def __init__(self, mdns_server, get_host_ip, on_log=None, parent=None):
         super().__init__(parent)
-        self._dns       = dns_server
+        self._mdns      = mdns_server
         self._get_ip    = get_host_ip
         self._on_log    = on_log or print
         self._build()
@@ -116,22 +114,23 @@ class DnsTab(QWidget):
         v.setSpacing(18)
 
         # Page header
-        v.addWidget(_lbl("DNS & Host Resolution", C_TEXT, 22, bold=True))
+        v.addWidget(_lbl("Network Discovery", C_TEXT, 22, bold=True))
         v.addWidget(_lbl(
-            "Make pgops.test and *.pgops.test resolve to this machine on any device.",
-            C_TEXT3, 12
+            "mDNS (Bonjour/Zeroconf) broadcasts pgops.local on your LAN so any device "
+            "connected to the same Wi-Fi can reach PGOps with no configuration.",
+            C_TEXT3, 12,
         ))
 
-        # Current status banner
+        # Status banner
         v.addWidget(self._status_banner())
 
-        # Method 1: Hosts File (local machine)
+        # mDNS control card
+        v.addWidget(self._mdns_card())
+
+        # Hosts file fallback card
         v.addWidget(self._hosts_card())
 
-        # Method 2: DNS Server (LAN-wide)
-        v.addWidget(self._dns_server_card())
-
-        # LAN device setup instructions
+        # Per-platform instructions
         v.addWidget(self._instructions_card())
 
         # QR code
@@ -141,7 +140,7 @@ class DnsTab(QWidget):
         scroll.setWidget(inner)
         outer.addWidget(scroll)
 
-    # ── Status banner ─────────────────────────────────────────────────────────
+    # ── Status banner ──────────────────────────────────────────────────────────
 
     def _status_banner(self):
         w = QWidget()
@@ -150,14 +149,36 @@ class DnsTab(QWidget):
         )
         h = QHBoxLayout(w)
         h.setContentsMargins(20, 14, 20, 14)
-        h.setSpacing(16)
+        h.setSpacing(20)
 
-        # Hosts status
+        # mDNS status
+        mdns_col = QVBoxLayout()
+        mdns_col.setSpacing(4)
+        ml = _lbl("MDNS BROADCAST", C_TEXT3, 9, bold=True)
+        ml.setStyleSheet(
+            f"color:{C_TEXT3};font-size:9px;font-weight:700;"
+            f"letter-spacing:1.5px;background:transparent;"
+        )
+        self._mdns_status_pill = QLabel("CHECKING...")
+        self._mdns_status_pill.setStyleSheet(
+            f"color:{C_TEXT3};font-size:12px;font-weight:700;background:transparent;"
+        )
+        mdns_col.addWidget(ml)
+        mdns_col.addWidget(self._mdns_status_pill)
+        h.addLayout(mdns_col)
+
+        div = QWidget()
+        div.setFixedSize(1, 36)
+        div.setStyleSheet(f"background:{C_BORDER2};border:none;")
+        h.addWidget(div)
+
+        # Hosts file status
         hosts_col = QVBoxLayout()
         hosts_col.setSpacing(4)
-        hl = _lbl("LOCAL MACHINE", C_TEXT3, 9, bold=True)
+        hl = _lbl("HOSTS FILE (LOCAL)", C_TEXT3, 9, bold=True)
         hl.setStyleSheet(
-            f"color:{C_TEXT3};font-size:9px;font-weight:700;letter-spacing:1.5px;background:transparent;"
+            f"color:{C_TEXT3};font-size:9px;font-weight:700;"
+            f"letter-spacing:1.5px;background:transparent;"
         )
         self._hosts_status_pill = QLabel("CHECKING...")
         self._hosts_status_pill.setStyleSheet(
@@ -167,39 +188,18 @@ class DnsTab(QWidget):
         hosts_col.addWidget(self._hosts_status_pill)
         h.addLayout(hosts_col)
 
-        # Divider
-        div = QWidget()
-        div.setFixedSize(1, 36)
-        div.setStyleSheet(f"background:{C_BORDER2};border:none;")
-        h.addWidget(div)
-
-        # DNS server status
-        dns_col = QVBoxLayout()
-        dns_col.setSpacing(4)
-        dl = _lbl("LAN DNS SERVER", C_TEXT3, 9, bold=True)
-        dl.setStyleSheet(
-            f"color:{C_TEXT3};font-size:9px;font-weight:700;letter-spacing:1.5px;background:transparent;"
-        )
-        self._dns_status_pill = QLabel("CHECKING...")
-        self._dns_status_pill.setStyleSheet(
-            f"color:{C_TEXT3};font-size:12px;font-weight:700;background:transparent;"
-        )
-        dns_col.addWidget(dl)
-        dns_col.addWidget(self._dns_status_pill)
-        h.addLayout(dns_col)
-
-        # Divider
         div2 = QWidget()
         div2.setFixedSize(1, 36)
         div2.setStyleSheet(f"background:{C_BORDER2};border:none;")
         h.addWidget(div2)
 
-        # Current IP
+        # Host IP
         ip_col = QVBoxLayout()
         ip_col.setSpacing(4)
         il = _lbl("HOST IP ADDRESS", C_TEXT3, 9, bold=True)
         il.setStyleSheet(
-            f"color:{C_TEXT3};font-size:9px;font-weight:700;letter-spacing:1.5px;background:transparent;"
+            f"color:{C_TEXT3};font-size:9px;font-weight:700;"
+            f"letter-spacing:1.5px;background:transparent;"
         )
         self._ip_display = QLabel("—")
         self._ip_display.setStyleSheet(
@@ -212,7 +212,12 @@ class DnsTab(QWidget):
 
         h.addStretch()
 
-        # Test resolution button
+        # Registered records count
+        self._records_lbl = _lbl("", C_TEXT3, 11)
+        h.addWidget(self._records_lbl)
+        h.addSpacing(10)
+
+        # Test button
         test_btn = _btn("Test Resolution", C_SURFACE2, C_BORDER2, C_TEXT2, h=32)
         test_btn.clicked.connect(self._test_resolution)
         h.addWidget(test_btn)
@@ -223,24 +228,68 @@ class DnsTab(QWidget):
 
         return w
 
-    # ── Hosts file card ───────────────────────────────────────────────────────
+    # ── mDNS control card ──────────────────────────────────────────────────────
 
-    def _hosts_card(self):
-        card = self._card("Method 1 — Hosts File  (Local Machine Only, Recommended)")
+    def _mdns_card(self):
+        card = self._card("mDNS Broadcast  —  Zero-Config LAN Discovery")
         cv = card.layout()
 
         desc = QLabel(
-            "Adds pgops.test to your system's hosts file. Instant, reliable, no DNS server needed. "
-            "Only affects the machine running PGOps. Requires Administrator / sudo."
+            "When mDNS is running, every device on the same Wi-Fi can open "
+            "http://pgops.local in their browser — no DNS settings, no hosts "
+            "file edits required. Each deployed app is also reachable as "
+            "http://<appname>.pgops.local."
         )
         desc.setWordWrap(True)
         desc.setStyleSheet(f"color:{C_TEXT3};font-size:12px;background:transparent;")
         cv.addWidget(desc)
 
-        self._hosts_inject_lbl = QLabel("")
-        self._hosts_inject_lbl.setWordWrap(True)
-        self._hosts_inject_lbl.setStyleSheet(f"color:{C_TEXT3};font-size:11px;background:transparent;")
-        cv.addWidget(self._hosts_inject_lbl)
+        # Registered apps list
+        self._apps_lbl = _lbl("", C_TEXT3, 11)
+        self._apps_lbl.setWordWrap(True)
+        cv.addWidget(self._apps_lbl)
+
+        btns = QHBoxLayout()
+        self.btn_mdns_start = _btn("▶  Start mDNS", "#166534", "#15803d", "#86efac", h=34)
+        self.btn_mdns_stop  = _btn("■  Stop",       "#7f1d1d", "#991b1b", "#fca5a5", h=34)
+        self.btn_mdns_start.clicked.connect(self._start_mdns)
+        self.btn_mdns_stop.clicked.connect(self._stop_mdns)
+        btns.addWidget(self.btn_mdns_start)
+        btns.addWidget(self.btn_mdns_stop)
+        btns.addStretch()
+        cv.addLayout(btns)
+
+        note = QLabel(
+            "mDNS starts automatically when PGOps launches. "
+            "It requires no elevated privileges and uses UDP port 5353."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet(
+            f"background:#1e2a1e;color:#86efac;padding:10px 14px;"
+            f"border-radius:6px;font-size:11px;"
+        )
+        cv.addWidget(note)
+        return card
+
+    # ── Hosts file card ────────────────────────────────────────────────────────
+
+    def _hosts_card(self):
+        card = self._card("Hosts File  —  Local Machine Fallback")
+        cv = card.layout()
+
+        desc = QLabel(
+            "If mDNS is blocked on your machine (corporate firewall, VPN, etc.), "
+            "inject pgops.local directly into the system hosts file. "
+            "This only affects the machine running PGOps — other devices still "
+            "use mDNS. Requires Administrator / sudo."
+        )
+        desc.setWordWrap(True)
+        desc.setStyleSheet(f"color:{C_TEXT3};font-size:12px;background:transparent;")
+        cv.addWidget(desc)
+
+        self._hosts_detail_lbl = _lbl("", C_TEXT3, 11)
+        self._hosts_detail_lbl.setWordWrap(True)
+        cv.addWidget(self._hosts_detail_lbl)
 
         btns = QHBoxLayout()
         self.btn_inject   = _btn("Inject Hosts File",  "#166534", "#15803d", "#86efac", h=34)
@@ -252,71 +301,18 @@ class DnsTab(QWidget):
         btns.addStretch()
         cv.addLayout(btns)
 
-        note = QLabel(
-            "After injecting: open https://pgops.test in your browser. "
-            "Accept the certificate warning once, or trust Caddy's CA from the SSL tab."
-        )
-        note.setWordWrap(True)
-        note.setStyleSheet(
-            f"background:#1e2a1e;color:#86efac;padding:10px 14px;"
-            f"border-radius:6px;font-size:11px;"
-        )
-        cv.addWidget(note)
         return card
 
-    # ── DNS server card ───────────────────────────────────────────────────────
-
-    def _dns_server_card(self):
-        card = self._card("Method 2 — DNS Server  (All LAN Devices)")
-        cv = card.layout()
-
-        desc = QLabel(
-            "Runs a DNS server so every device on your network can resolve pgops.test automatically. "
-            "Requires Administrator / sudo for port 53. Point other devices' DNS to the Host IP above."
-        )
-        desc.setWordWrap(True)
-        desc.setStyleSheet(f"color:{C_TEXT3};font-size:12px;background:transparent;")
-        cv.addWidget(desc)
-
-        # Port info
-        self._dns_port_lbl = QLabel("")
-        self._dns_port_lbl.setStyleSheet(
-            f"color:{C_TEXT2};font-size:12px;font-family:'Consolas','Courier New',monospace;"
-            f"background:transparent;"
-        )
-        cv.addWidget(self._dns_port_lbl)
-
-        btns = QHBoxLayout()
-        self.btn_dns_start  = _btn("Start DNS Server",  "#166534", "#15803d", "#86efac", h=34)
-        self.btn_dns_stop   = _btn("Stop",              "#7f1d1d", "#991b1b", "#fca5a5", h=34)
-        self.btn_dns_start.clicked.connect(self._start_dns)
-        self.btn_dns_stop.clicked.connect(self._stop_dns)
-        btns.addWidget(self.btn_dns_start)
-        btns.addWidget(self.btn_dns_stop)
-        btns.addStretch()
-        cv.addLayout(btns)
-
-        warn = QLabel(
-            "If port 53 is denied, PGOps uses port 5353. "
-            "Clients must then set DNS to host-ip:5353 — most systems don't support custom ports natively. "
-            "Use hosts file injection for the local machine instead."
-        )
-        warn.setWordWrap(True)
-        warn.setStyleSheet(
-            f"background:#2a1e0a;color:#fbbf24;padding:10px 14px;"
-            f"border-radius:6px;font-size:11px;"
-        )
-        cv.addWidget(warn)
-        return card
-
-    # ── Instructions card ─────────────────────────────────────────────────────
+    # ── Instructions card ──────────────────────────────────────────────────────
 
     def _instructions_card(self):
-        card = self._card("Configure Other Devices  (LAN-Wide)")
+        card = self._card("Connecting Other Devices")
         cv = card.layout()
+
         cv.addWidget(_lbl(
-            "Point other devices to this machine's DNS server, or manually add hosts entries on each device.",
-            C_TEXT3, 12
+            "With mDNS running, other devices just need to be on the same Wi-Fi network. "
+            "No DNS changes, no IP addresses to remember.",
+            C_TEXT3, 12,
         ))
 
         tabs = QTabWidget()
@@ -328,11 +324,15 @@ class DnsTab(QWidget):
             f"border-bottom:none;border-radius:4px 4px 0 0;font-size:11px;font-weight:600;}}"
             f"QTabBar::tab:selected{{background:{C_SURFACE2};color:{C_TEXT};}}"
         )
+
+        from core.mdns_server import get_client_setup_instructions
+        instructions = get_client_setup_instructions()
+
         self._instr_texts: dict[str, QTextEdit] = {}
-        for name in ("Windows", "macOS", "Android", "iOS", "Linux"):
-            te = QTextEdit()
+        for name, text in instructions.items():
+            te = QTextEdit(text)
             te.setReadOnly(True)
-            te.setFixedHeight(130)
+            te.setFixedHeight(140)
             te.setStyleSheet(
                 f"background:{C_SURFACE2};color:{C_TEXT2};"
                 f"font-family:'Consolas','Courier New',monospace;"
@@ -340,13 +340,14 @@ class DnsTab(QWidget):
             )
             self._instr_texts[name] = te
             tabs.addTab(te, name)
+
         cv.addWidget(tabs)
         return card
 
-    # ── QR card ───────────────────────────────────────────────────────────────
+    # ── QR card ────────────────────────────────────────────────────────────────
 
     def _qr_card(self):
-        card = self._card("Quick Setup — Scan on Other Devices")
+        card = self._card("Quick Connect — Scan on Other Devices")
         cv = card.layout()
 
         h = QHBoxLayout()
@@ -360,22 +361,22 @@ class DnsTab(QWidget):
 
         right = QVBoxLayout()
         right.setSpacing(8)
-        right.addWidget(_lbl("https://pgops.test", C_BLUE, 15, bold=True))
+        right.addWidget(_lbl("http://pgops.local", C_BLUE, 15, bold=True))
         right.addWidget(_lbl(
             "Scan on any device to open the PGOps landing page.\n"
-            "The page shows DNS setup instructions for that device.",
-            C_TEXT3, 12
+            "No DNS configuration needed — just connect to the same Wi-Fi.",
+            C_TEXT3, 12,
         ))
 
         copy_row = QHBoxLayout()
         copy_btn = _btn("Copy URL", C_SURFACE2, C_BORDER2, C_TEXT2, h=30)
         copy_btn.clicked.connect(lambda: (
-            QApplication.clipboard().setText("https://pgops.test"),
+            QApplication.clipboard().setText("http://pgops.local"),
             copy_btn.setText("✓ Copied"),
-            QTimer.singleShot(1400, lambda: copy_btn.setText("Copy URL"))
+            QTimer.singleShot(1400, lambda: copy_btn.setText("Copy URL")),
         ))
         open_btn = _btn("Open in Browser", C_BLUE, "#3b7de8", h=30)
-        open_btn.clicked.connect(lambda: webbrowser.open("https://pgops.test"))
+        open_btn.clicked.connect(lambda: webbrowser.open("http://pgops.local"))
         copy_row.addWidget(copy_btn)
         copy_row.addWidget(open_btn)
         copy_row.addStretch()
@@ -386,7 +387,7 @@ class DnsTab(QWidget):
         cv.addLayout(h)
         return card
 
-    # ── Card helper ───────────────────────────────────────────────────────────
+    # ── Card helper ────────────────────────────────────────────────────────────
 
     def _card(self, title: str) -> QWidget:
         card = QWidget()
@@ -404,15 +405,39 @@ class DnsTab(QWidget):
         v.addWidget(_sep())
         return card
 
-    # ── Refresh / update ──────────────────────────────────────────────────────
+    # ── Refresh ────────────────────────────────────────────────────────────────
 
     def refresh(self):
         host_ip = self._get_ip()
         self._ip_display.setText(host_ip)
 
+        # mDNS status
+        mdns_running = self._mdns.is_running()
+        if mdns_running:
+            self._mdns_status_pill.setText("● RUNNING")
+            self._mdns_status_pill.setStyleSheet(
+                f"color:{C_GREEN};font-size:12px;font-weight:700;background:transparent;"
+            )
+            apps = self._mdns.registered_apps()
+            rec_count = 1 + len(apps)   # pgops.local + app subdomains
+            self._records_lbl.setText(f"{rec_count} .local record(s) active")
+            if apps:
+                self._apps_lbl.setText(
+                    "Registered apps: " + ", ".join(f"{a}.pgops.local" for a in apps)
+                )
+            else:
+                self._apps_lbl.setText("No app subdomains registered yet.")
+        else:
+            self._mdns_status_pill.setText("● STOPPED")
+            self._mdns_status_pill.setStyleSheet(
+                f"color:{C_RED};font-size:12px;font-weight:700;background:transparent;"
+            )
+            self._records_lbl.setText("")
+            self._apps_lbl.setText("")
+
         # Hosts file status
         from core.dns_server import is_hosts_injected, get_hosts_current_ip
-        injected = is_hosts_injected()
+        injected    = is_hosts_injected()
         injected_ip = get_hosts_current_ip()
 
         if injected and injected_ip:
@@ -421,52 +446,29 @@ class DnsTab(QWidget):
                 self._hosts_status_pill.setStyleSheet(
                     f"color:{C_GREEN};font-size:12px;font-weight:700;background:transparent;"
                 )
-                self._hosts_inject_lbl.setText(
-                    f"✓ pgops.test → {injected_ip}  (up to date)"
+                self._hosts_detail_lbl.setText(
+                    f"✓ pgops.local → {injected_ip}  (up to date)"
                 )
             else:
                 self._hosts_status_pill.setText("⚠ STALE IP")
                 self._hosts_status_pill.setStyleSheet(
                     f"color:{C_AMBER};font-size:12px;font-weight:700;background:transparent;"
                 )
-                self._hosts_inject_lbl.setText(
-                    f"pgops.test → {injected_ip}  (outdated — current IP is {host_ip})"
+                self._hosts_detail_lbl.setText(
+                    f"pgops.local → {injected_ip}  "
+                    f"(outdated — current IP is {host_ip})"
                 )
         else:
             self._hosts_status_pill.setText("● NOT SET")
             self._hosts_status_pill.setStyleSheet(
-                f"color:{C_RED};font-size:12px;font-weight:700;background:transparent;"
+                f"color:{C_TEXT3};font-size:12px;font-weight:700;background:transparent;"
             )
-            self._hosts_inject_lbl.setText("Not injected — click 'Inject Hosts File' below.")
-
-        # DNS server status
-        dns_running = self._dns.is_running()
-        if dns_running:
-            port = self._dns.port
-            qualifier = "" if port == 53 else f" (port {port})"
-            self._dns_status_pill.setText(f"● RUNNING{qualifier}")
-            self._dns_status_pill.setStyleSheet(
-                f"color:{C_GREEN};font-size:12px;font-weight:700;background:transparent;"
+            self._hosts_detail_lbl.setText(
+                "Not injected. Click 'Inject Hosts File' to add a local entry."
             )
-            self._dns_port_lbl.setText(
-                f"Listening on 0.0.0.0:{port}  ·  *.pgops.test → {host_ip}"
-            )
-        else:
-            self._dns_status_pill.setText("● STOPPED")
-            self._dns_status_pill.setStyleSheet(
-                f"color:{C_RED};font-size:12px;font-weight:700;background:transparent;"
-            )
-            self._dns_port_lbl.setText("Not running")
-
-        # Instructions
-        from core.dns_server import get_client_setup_instructions
-        instructions = get_client_setup_instructions(host_ip)
-        for name, text in instructions.items():
-            if name in self._instr_texts:
-                self._instr_texts[name].setPlainText(text)
 
         # QR code
-        px = _make_qr_pixmap("https://pgops.test", 170)
+        px = _make_qr_pixmap("http://pgops.local", 170)
         if px:
             self._qr_lbl.setPixmap(px)
         else:
@@ -476,51 +478,61 @@ class DnsTab(QWidget):
                 f"background:{C_SURFACE2};border:1px solid {C_BORDER};border-radius:8px;"
             )
 
-    # ── Button handlers ───────────────────────────────────────────────────────
+    # ── Button handlers ────────────────────────────────────────────────────────
+
+    def _start_mdns(self):
+        ok, msg = self._mdns.start()
+        self._on_log(f"[mDNS] {msg}")
+        if not ok:
+            QMessageBox.warning(self, "mDNS", msg)
+        self.refresh()
+
+    def _stop_mdns(self):
+        reply = QMessageBox.question(
+            self, "Stop mDNS",
+            "Stopping mDNS means other devices can no longer reach pgops.local "
+            "or app subdomains automatically.\n\nContinue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        ok, msg = self._mdns.stop()
+        self._on_log(f"[mDNS] {msg}")
+        self.refresh()
 
     def _inject_hosts(self):
         from core.app_manager import load_apps
         apps = load_apps()
-        domains = [a.get("domain", "") for a in apps if a.get("domain")]
-        ok, msg = self._dns.inject_hosts(app_domains=domains)
+        # Build the list of .local domains for deployed apps
+        app_domains = []
+        for app in apps:
+            domain = app.get("domain", "")
+            if domain:
+                # domain is stored as e.g. "myapp.pgops.local" — keep as-is
+                app_domains.append(domain)
+        ok, msg = self._mdns.inject_hosts(app_domains=app_domains)
         self._on_log(f"[Hosts] {msg}")
         if ok:
             QMessageBox.information(
                 self, "Hosts File Updated",
-                f"{msg}\n\nYou can now open https://pgops.test in your browser.\n"
-                "Accept the certificate, or trust the Caddy CA from the SSL tab."
+                f"{msg}\n\nYou can now open http://pgops.local in your browser."
             )
         else:
             QMessageBox.warning(self, "Hosts File Error", msg)
         self.refresh()
 
     def _remove_hosts(self):
-        ok, msg = self._dns.remove_hosts()
+        ok, msg = self._mdns.remove_hosts()
         self._on_log(f"[Hosts] {msg}")
-        self.refresh()
-
-    def _start_dns(self):
-        ok, msg = self._dns.start()
-        self._on_log(msg)
-        if not ok:
-            QMessageBox.warning(
-                self, "DNS Server",
-                f"{msg}\n\nTip: Use 'Inject Hosts File' for the local machine instead — "
-                "it requires no special permissions and works immediately."
-            )
-        self.refresh()
-
-    def _stop_dns(self):
-        ok, msg = self._dns.stop()
-        self._on_log(msg)
         self.refresh()
 
     def _test_resolution(self):
         from core.dns_server import test_resolution
-        ok, msg = test_resolution()
+        ok, msg = test_resolution("pgops.local")
         self._test_result.setText(msg)
         color = C_GREEN if ok else C_RED
         self._test_result.setStyleSheet(
             f"color:{color};font-size:11px;background:transparent;"
         )
-        self._on_log(f"[DNS Test] {msg}")
+        self._on_log(f"[mDNS Test] {msg}")

@@ -1,23 +1,67 @@
 """
 ssl_manager.py
-Generates a self-signed TLS certificate and configures PostgreSQL to use it.
+TLS certificate management for PGOps — backed by mkcert.
 
-FIXES:
-- cert_path / key_path now correctly reference base_dir/ssl/ subdirectory
-- generate_certificate() fetches current LAN IPs at generation time
-- enable_ssl() copies certs to DATA_DIR (pgdata) with correct permissions
-- postgresql.conf update regex is anchored correctly (no partial matches)
-- get_cert_info() uses not_valid_after_utc for Python 3.12 compatibility
-- export_ca_cert() uses correct base_dir argument
-- disable_ssl() does not delete cert files — only updates conf
+Design
+------
+- The authoritative cert lives at  <app_root>/certs/pgops.crt
+  and its key at                   <app_root>/certs/pgops.key
+  These fixed paths are used by Caddy, PostgreSQL, and pgAdmin.
+- mkcert generates the cert so the local CA (already trusted by the system)
+  signs it — zero browser warnings on the machine that ran the setup.
+- PostgreSQL is configured to use the cert by copying it into pgdata and
+  updating postgresql.conf; the source of truth is always certs/.
+- get_cert_info() reads the cert directly from certs/ and returns rich
+  metadata including SANs (used by tab_ssl to show the domains covered).
+- enable_ssl_with_paths() is the primary API called by tab_ssl; the older
+  enable_ssl(base_dir, data_dir) is kept as a thin compatibility wrapper.
 """
 
-import subprocess
+import os
 import platform
-import datetime
 import shutil
+import subprocess
 from pathlib import Path
 
+
+# ── App-root resolution ───────────────────────────────────────────────────────
+
+def _get_app_root() -> Path:
+    """
+    Return the PGOps app root directory.
+    When frozen (PyInstaller), this is the directory that contains the exe.
+    In development it is the repo root (three levels up from this file).
+    """
+    import sys
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).parent
+    return Path(__file__).parent.parent.parent
+
+
+# ── Fixed cert paths ──────────────────────────────────────────────────────────
+
+def get_certs_dir() -> Path:
+    """Return <app_root>/certs/, creating it if necessary."""
+    d = _get_app_root() / "certs"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def cert_path() -> Path:
+    """Absolute path to pgops.crt — used by Caddy, Postgres, pgAdmin."""
+    return get_certs_dir() / "pgops.crt"
+
+
+def key_path() -> Path:
+    """Absolute path to pgops.key."""
+    return get_certs_dir() / "pgops.key"
+
+
+def is_cert_generated() -> bool:
+    return cert_path().exists() and key_path().exists()
+
+
+# ── mkcert helpers ────────────────────────────────────────────────────────────
 
 def _popen_kwargs() -> dict:
     if platform.system() == "Windows":
@@ -26,204 +70,175 @@ def _popen_kwargs() -> dict:
     return {}
 
 
-def get_ssl_dir(base_dir: Path) -> Path:
-    d = Path(base_dir) / "ssl"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+def _run_mkcert(*args, log_fn=None) -> tuple[bool, str]:
+    """Run mkcert with the given arguments and return (ok, combined_output)."""
+    from core.mkcert_manager import get_mkcert_bin
+    bin_path = get_mkcert_bin()
+    if not bin_path.exists():
+        return False, f"mkcert binary not found at {bin_path}. Run Full Setup first."
 
-
-def cert_path(base_dir: Path) -> Path:
-    return get_ssl_dir(base_dir) / "server.crt"
-
-
-def key_path(base_dir: Path) -> Path:
-    return get_ssl_dir(base_dir) / "server.key"
-
-
-def is_ssl_configured(base_dir: Path) -> bool:
-    return cert_path(base_dir).exists() and key_path(base_dir).exists()
-
-
-def generate_certificate(base_dir: Path, hostname: str = "pgops.test") -> tuple[bool, str]:
-    """
-    Generate a self-signed TLS certificate valid for 10 years.
-    Uses the cryptography library — no openssl binary needed.
-    """
+    cmd = [str(bin_path)] + list(args)
     try:
-        from cryptography import x509
-        from cryptography.x509.oid import NameOID
-        from cryptography.hazmat.primitives import hashes, serialization
-        from cryptography.hazmat.primitives.asymmetric import rsa
-        from cryptography.x509 import IPAddress, DNSName
-        import ipaddress
-    except ImportError:
-        return False, (
-            "cryptography package not installed.\n"
-            "Run: pip install cryptography"
+        r = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            **_popen_kwargs(),
         )
+        output = (r.stdout + r.stderr).strip()
+        if log_fn and output:
+            log_fn(output)
+        return r.returncode == 0, output
+    except Exception as exc:
+        return False, f"mkcert invocation failed: {exc}"
 
-    ssl_dir = get_ssl_dir(base_dir)
 
-    # Generate private key
-    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+# ── Certificate generation ────────────────────────────────────────────────────
 
-    subject = issuer = x509.Name([
-        x509.NameAttribute(NameOID.COMMON_NAME, hostname),
-        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "PGOps"),
-    ])
+def generate_certificate(log_fn=None) -> tuple[bool, str]:
+    """
+    Use mkcert to generate a certificate that covers pgops.local, all its
+    subdomains, localhost, and the current LAN IPs.
 
+    Output is written directly to:
+      certs/pgops.crt
+      certs/pgops.key
+
+    mkcert supports -cert-file / -key-file flags to control the output paths
+    exactly, so no renaming is needed.
+    """
     # Build SAN list
-    san_entries = [
-        DNSName(hostname),
-        DNSName(f"*.{hostname}"),   # wildcard for all subdomains
-        DNSName("localhost"),
-        DNSName("pgops"),
-        IPAddress(ipaddress.IPv4Address("127.0.0.1")),
+    domains = [
+        "pgops.local",
+        "*.pgops.local",
+        "localhost",
+        "127.0.0.1",
     ]
 
-    # Add all current LAN IPs
     try:
-        from core.network_info import get_all_interfaces, get_best_ip
-        ifaces = get_all_interfaces()
-        for iface in ifaces:
+        from core.network_info import get_all_interfaces
+        for iface in get_all_interfaces():
             ip = iface.get("ip", "")
-            if ip and ip != "127.0.0.1" and not ip.startswith("169.254"):
-                try:
-                    san_entries.append(IPAddress(ipaddress.IPv4Address(ip)))
-                except Exception:
-                    pass
+            if ip and ip not in domains and not ip.startswith("169.254"):
+                domains.append(ip)
     except Exception:
         pass
 
-    # Always include common hotspot and loopback IPs
-    for extra_ip in ("192.168.137.1", "0.0.0.0"):
+    if "192.168.137.1" not in domains:
+        domains.append("192.168.137.1")
+
+    if log_fn:
+        log_fn(f"[ssl_manager] Generating mkcert certificate for: {', '.join(domains)}")
+
+    ok, msg = _run_mkcert(
+        "-cert-file", str(cert_path()),
+        "-key-file",  str(key_path()),
+        *domains,
+        log_fn=log_fn,
+    )
+
+    if not ok:
+        return False, f"mkcert certificate generation failed:\n{msg}"
+
+    if platform.system() != "Windows":
         try:
-            entry = IPAddress(ipaddress.IPv4Address(extra_ip))
-            if entry not in san_entries:
-                san_entries.append(entry)
+            os.chmod(key_path(), 0o600)
         except Exception:
             pass
 
-    now = datetime.datetime.utcnow()
-    cert = (
-        x509.CertificateBuilder()
-        .subject_name(subject)
-        .issuer_name(issuer)
-        .public_key(key.public_key())
-        .serial_number(x509.random_serial_number())
-        .not_valid_before(now)
-        .not_valid_after(now + datetime.timedelta(days=3650))
-        .add_extension(x509.SubjectAlternativeName(san_entries), critical=False)
-        .add_extension(
-            x509.BasicConstraints(ca=True, path_length=None), critical=True
-        )
-        .add_extension(
-            x509.KeyUsage(
-                digital_signature=True,
-                key_cert_sign=True,
-                content_commitment=False,
-                key_encipherment=True,
-                data_encipherment=False,
-                key_agreement=False,
-                crl_sign=False,
-                encipher_only=False,
-                decipher_only=False,
-            ),
-            critical=True,
-        )
-        .sign(key, hashes.SHA256())
-    )
-
-    # Write private key (PostgreSQL requires no passphrase)
-    key_file = key_path(base_dir)
-    key_file.write_bytes(
-        key.private_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PrivateFormat.TraditionalOpenSSL,
-            encryption_algorithm=serialization.NoEncryption(),
-        )
-    )
-
-    # Write certificate
-    crt_file = cert_path(base_dir)
-    crt_file.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
-
-    # PostgreSQL requires key file to have restricted permissions on Unix
-    if platform.system() != "Windows":
-        import os
-        os.chmod(key_file, 0o600)
-
-    exp_date = (now + datetime.timedelta(days=3650)).strftime("%Y-%m-%d")
+    info = get_cert_info()
+    exp = info.get("expires", "unknown")
     return True, (
-        f"Certificate generated. Valid until {exp_date}.\n"
-        f"File: {crt_file}"
+        f"Certificate generated via mkcert. Valid until {exp}.\n"
+        f"Cert : {cert_path()}\n"
+        f"Key  : {key_path()}"
     )
 
 
-def enable_ssl(base_dir: Path, data_dir: Path) -> tuple[bool, str]:
-    """
-    Copy certs to pgdata and enable SSL in postgresql.conf.
-    base_dir: the PGOps appdata dir (contains ssl/ subdir with certs)
-    data_dir: PostgreSQL data directory (pgdata)
-    """
-    base_dir = Path(base_dir)
-    data_dir = Path(data_dir)
+# ── PostgreSQL SSL ────────────────────────────────────────────────────────────
 
-    if not is_ssl_configured(base_dir):
-        return False, "No certificate found. Generate one first."
+def enable_ssl_with_paths(
+    data_dir: Path,
+    crt_file: str = "",
+    key_file: str = "",
+) -> tuple[bool, str]:
+    """
+    Copy the mkcert cert into pgdata and enable SSL in postgresql.conf.
+
+    crt_file / key_file default to the canonical certs/pgops.{crt,key} if
+    not supplied.  This is the primary entry-point called by tab_ssl.
+    """
+    data_dir = Path(data_dir)
+    crt = Path(crt_file) if crt_file else cert_path()
+    key = Path(key_file) if key_file else key_path()
+
+    if not crt.exists() or not key.exists():
+        return False, (
+            "Certificate not found.\n"
+            f"Expected:\n  {crt}\n  {key}\n\n"
+            "Run Full Setup on the SSL tab first."
+        )
 
     if not data_dir.exists():
         return False, f"PostgreSQL data directory not found: {data_dir}"
 
-    # Copy cert and key into pgdata
     pg_crt = data_dir / "server.crt"
     pg_key = data_dir / "server.key"
 
     try:
-        shutil.copy2(cert_path(base_dir), pg_crt)
-        shutil.copy2(key_path(base_dir), pg_key)
-    except Exception as e:
-        return False, f"Failed to copy SSL files to pgdata: {e}"
+        shutil.copy2(crt, pg_crt)
+        shutil.copy2(key, pg_key)
+    except Exception as exc:
+        return False, f"Failed to copy SSL files to pgdata: {exc}"
 
     if platform.system() != "Windows":
-        import os
         try:
             os.chmod(pg_key, 0o600)
-            # PostgreSQL also needs the key owned by the postgres process user
-            # On most systems this is the current user when running portably
         except Exception:
             pass
 
-    # Update postgresql.conf
     ok, msg = _set_ssl_conf(data_dir, enabled=True)
     if not ok:
         return False, msg
 
     return True, (
-        "SSL enabled. Restart the server to apply.\n\n"
+        "PostgreSQL SSL enabled using the mkcert certificate.\n"
+        "Restart the database server to apply.\n\n"
+        f"Source : {crt}\n"
+        f"Copied : {pg_crt}\n\n"
         "Connect with:  sslmode=require"
     )
 
 
+def enable_ssl(base_dir: Path, data_dir: Path) -> tuple[bool, str]:
+    """
+    Backwards-compatibility wrapper — ignores base_dir and uses the
+    canonical certs/ paths.
+    """
+    return enable_ssl_with_paths(data_dir)
+
+
 def disable_ssl(data_dir: Path) -> tuple[bool, str]:
+    """Turn off SSL in postgresql.conf without touching the cert files."""
     data_dir = Path(data_dir)
     ok, msg = _set_ssl_conf(data_dir, enabled=False)
     if not ok:
         return False, msg
-    return True, "SSL disabled. Restart the server to apply."
+    return True, "SSL disabled. Restart the database server to apply."
 
 
 def _set_ssl_conf(data_dir: Path, enabled: bool) -> tuple[bool, str]:
-    """Update or append ssl settings in postgresql.conf."""
+    """Update or append SSL directives in postgresql.conf."""
     conf = Path(data_dir) / "postgresql.conf"
     if not conf.exists():
-        return False, "postgresql.conf not found — initialize the cluster first."
+        return False, "postgresql.conf not found — initialise the cluster first."
 
     import re
     text = conf.read_text(encoding="utf-8", errors="replace")
 
     def replace_or_append(src: str, key: str, value: str) -> str:
-        # Match lines that are: optional #, optional spaces, key, spaces, =, rest
         pattern = re.compile(
             rf"^[ \t]*#?[ \t]*{re.escape(key)}[ \t]*=.*$", re.MULTILINE
         )
@@ -236,25 +251,30 @@ def _set_ssl_conf(data_dir: Path, enabled: bool) -> tuple[bool, str]:
     text = replace_or_append(text, "ssl", value)
 
     if enabled:
-        # Use bare filenames — PostgreSQL resolves them relative to data_dir
         text = replace_or_append(text, "ssl_cert_file", "'server.crt'")
-        text = replace_or_append(text, "ssl_key_file", "'server.key'")
-        text = replace_or_append(text, "ssl_ca_file", "''")
+        text = replace_or_append(text, "ssl_key_file",  "'server.key'")
+        text = replace_or_append(text, "ssl_ca_file",   "''")
 
     try:
         conf.write_text(text, encoding="utf-8")
-    except Exception as e:
-        return False, f"Cannot write postgresql.conf: {e}"
+    except Exception as exc:
+        return False, f"Cannot write postgresql.conf: {exc}"
 
     return True, f"ssl = {value} written to postgresql.conf"
 
 
+# ── Status helpers ────────────────────────────────────────────────────────────
+
 def get_ssl_status(data_dir: Path) -> dict:
-    """Return current SSL config state from postgresql.conf."""
+    """
+    Return current SSL state from postgresql.conf plus cert presence info.
+    Called by tab_ssl to drive the status labels.
+    """
     conf = Path(data_dir) / "postgresql.conf"
-    enabled = False
+    enabled  = False
     ssl_cert = ""
     ssl_key  = ""
+
     if conf.exists():
         import re
         try:
@@ -262,56 +282,113 @@ def get_ssl_status(data_dir: Path) -> dict:
             m = re.search(r"^[ \t]*ssl[ \t]*=[ \t]*(\w+)", text, re.MULTILINE)
             if m:
                 enabled = m.group(1).lower() == "on"
-            mc = re.search(r"^[ \t]*ssl_cert_file[ \t]*=[ \t]*'([^']*)'", text, re.MULTILINE)
+            mc = re.search(
+                r"^[ \t]*ssl_cert_file[ \t]*=[ \t]*'([^']*)'", text, re.MULTILINE
+            )
             if mc:
                 ssl_cert = mc.group(1)
-            mk = re.search(r"^[ \t]*ssl_key_file[ \t]*=[ \t]*'([^']*)'", text, re.MULTILINE)
+            mk = re.search(
+                r"^[ \t]*ssl_key_file[ \t]*=[ \t]*'([^']*)'", text, re.MULTILINE
+            )
             if mk:
                 ssl_key = mk.group(1)
         except Exception:
             pass
 
-    from core.pg_manager import BASE_DIR
     return {
         "enabled":     enabled,
-        "cert_exists": cert_path(BASE_DIR).exists(),
-        "key_exists":  key_path(BASE_DIR).exists(),
+        "cert_exists": cert_path().exists(),
+        "key_exists":  key_path().exists(),
         "ssl_cert":    ssl_cert,
         "ssl_key":     ssl_key,
+        "cert_path":   str(cert_path()),
+        "key_path":    str(key_path()),
     }
 
 
-def get_cert_info(base_dir: Path) -> dict:
-    """Return cert expiry and subject info."""
-    crt = cert_path(Path(base_dir))
+def get_cert_info() -> dict:
+    """
+    Parse the mkcert-generated cert and return:
+      expires  — expiry date string (YYYY-MM-DD)
+      subject  — CN value
+      serial   — first 12 chars of serial number
+      sans     — list of DNS names and IP strings from the SAN extension
+
+    Returns {} if the cert does not exist, {"error": ...} on parse failure.
+    Requires the 'cryptography' package (pip install cryptography).
+    """
+    crt = cert_path()
     if not crt.exists():
         return {}
+
     try:
         from cryptography import x509
+        from cryptography.x509 import DNSName, IPAddress
+
         cert = x509.load_pem_x509_certificate(crt.read_bytes())
-        # Use not_valid_after_utc for Python 3.12+, fall back to not_valid_after
+
         try:
             exp = cert.not_valid_after_utc.strftime("%Y-%m-%d")
         except AttributeError:
             exp = cert.not_valid_after.strftime("%Y-%m-%d")
 
         cn_attrs = cert.subject.get_attributes_for_oid(x509.oid.NameOID.COMMON_NAME)
+        subject = cn_attrs[0].value if cn_attrs else "unknown"
+
+        sans: list[str] = []
+        try:
+            san_ext = cert.extensions.get_extension_for_class(
+                x509.SubjectAlternativeName
+            )
+            for entry in san_ext.value:
+                if isinstance(entry, DNSName):
+                    sans.append(entry.value)
+                elif isinstance(entry, IPAddress):
+                    sans.append(str(entry.value))
+        except x509.ExtensionNotFound:
+            pass
+
         return {
             "expires": exp,
-            "subject": cn_attrs[0].value if cn_attrs else "unknown",
+            "subject": subject,
             "serial":  str(cert.serial_number)[:12],
+            "sans":    sans,
         }
-    except Exception as e:
-        return {"error": str(e)}
+
+    except ImportError:
+        return {
+            "expires": "unknown (install 'cryptography' for details)",
+            "sans":    [],
+        }
+    except Exception as exc:
+        return {"error": str(exc)}
 
 
-def export_ca_cert(base_dir: Path, dest: Path) -> tuple[bool, str]:
-    """Copy the server cert to a location the user can distribute to clients."""
-    crt = cert_path(Path(base_dir))
-    if not crt.exists():
-        return False, "No certificate to export."
+def export_ca_cert(dest, log_fn=None) -> tuple[bool, str]:
+    """
+    Export the mkcert root CA so users can import it on other devices.
+    Delegates to mkcert_manager which knows the CAROOT path.
+    """
     try:
-        shutil.copy2(crt, dest)
-        return True, f"Certificate exported to {dest}"
-    except Exception as e:
-        return False, f"Export failed: {e}"
+        from core.mkcert_manager import export_ca_cert as _mk_export
+        return _mk_export(dest, log_fn=log_fn)
+    except Exception as exc:
+        return False, f"CA export failed: {exc}"
+
+
+# ── pgAdmin helpers ───────────────────────────────────────────────────────────
+
+def get_pgadmin_ssl_config() -> dict:
+    """
+    Return the SSL paths block for pgAdmin's config_local.py.
+
+    In config_local.py:
+        DEFAULT_SERVER_SSL_CERT = get_pgadmin_ssl_config()["cert"]
+        DEFAULT_SERVER_SSL_KEY  = get_pgadmin_ssl_config()["key"]
+    """
+    return {
+        "cert":        str(cert_path()),
+        "key":         str(key_path()),
+        "cert_exists": cert_path().exists(),
+        "key_exists":  key_path().exists(),
+    }
