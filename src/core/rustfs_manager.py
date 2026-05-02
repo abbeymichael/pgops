@@ -1,39 +1,34 @@
 """
 rustfs_manager.py
 Manages the RustFS object storage server.
-Migrated from seaweedfs_manager.py — RustFS is a single-binary, S3-compatible
-object storage server (100% S3 API compatible, Apache 2.0 licensed).
 
-RustFS architecture used here:
-  A single binary (`rustfs` or `rustfs.exe`) that acts as a MinIO-compatible
-  S3 server. Unlike SeaweedFS, RustFS requires no separate master/volume/filer
-  sub-processes — it is a single self-contained process, exactly like MinIO.
+RustFS is a single-binary, S3-compatible object storage server (Apache 2.0).
+It uses the same port layout as MinIO but is configured exclusively via
+RUSTFS_* environment variables — it does NOT accept positional path arguments
+like MinIO/SeaweedFS do.
 
-  - rustfs server  → listens on 127.0.0.1:9000  (S3 API, same port as MinIO)
-  - console        → listens on 127.0.0.1:9001  (Web console)
+Environment variables used:
+  RUSTFS_VOLUMES          — data directory (required)
+  RUSTFS_ADDRESS          — S3 API bind address (default :9000)
+  RUSTFS_CONSOLE_ADDRESS  — Console bind address (default :9001)
+  RUSTFS_CONSOLE_ENABLE   — "true" to enable web UI
+  RUSTFS_ACCESS_KEY       — root access key
+  RUSTFS_SECRET_KEY       — root secret key
+  RUSTFS_OBS_LOGGER_LEVEL — log level (info/warn/error)
 
-URL strategy (post-Caddy/mkcert migration):
-  - All external-facing URLs use the mkcert-secured Caddy subdomains:
-      S3 API endpoint  → https://s3.pgops.local:<https_port>
-      Web console      → https://console.pgops.local:<https_port>
-  - RustFS itself still listens on plain HTTP internally (127.0.0.1:9000).
-    Caddy terminates TLS and reverse-proxies to it.
-  - Laravel .env must use the HTTPS Caddy URL as AWS_ENDPOINT so that
-    apps on the LAN can reach storage without certificate warnings.
-  - The raw internal URL (http://127.0.0.1:9000) is only used for health
-    checks inside this process.
+Health check: GET http://127.0.0.1:<api_port>/health  → 200 OK
 
-RustFS is 100% S3-compatible and exposes the same AWS IAM API surface
-that SeaweedFS and MinIO do, so bucket_manager.py works without changes
-beyond the port/data-dir references.
+URL strategy (via Caddy + mkcert):
+  S3 API   → https://s3.pgops.local[:<https_port>]
+  Console  → https://console.pgops.local[:<https_port>]
+  Internal → http://127.0.0.1:<api_port>  (health checks / mc alias only)
 
 Binary distribution:
-  RustFS ships a single self-contained binary per platform.
   Download base: https://dl.rustfs.com/artifacts/rustfs/
-  Linux  (amd64): rustfs-release-x86_64-unknown-linux-musl.zip
-  macOS  (amd64): rustfs-release-x86_64-apple-darwin.zip
-  macOS  (arm64): rustfs-release-aarch64-apple-darwin.zip
-  Windows(amd64): rustfs-release-x86_64-pc-windows-msvc.zip
+  Windows amd64: rustfs-release-x86_64-pc-windows-msvc.zip
+  macOS   amd64: rustfs-release-x86_64-apple-darwin.zip
+  macOS   arm64: rustfs-release-aarch64-apple-darwin.zip
+  Linux   amd64: rustfs-release-x86_64-unknown-linux-musl.zip
 """
 
 import os
@@ -43,20 +38,25 @@ import platform
 import shutil
 import socket
 import time
-import requests
+import zipfile
+import tempfile
 from pathlib import Path
 
+try:
+    import requests as _requests
+    _HAS_REQUESTS = True
+except ImportError:
+    _HAS_REQUESTS = False
+
 # ── Download URLs ─────────────────────────────────────────────────────────────
-# RustFS ships a single binary per platform inside a ZIP archive.
-# The binary inside the ZIP is named "rustfs" (or "rustfs.exe" on Windows).
+
 _RUSTFS_BASE = "https://dl.rustfs.com/artifacts/rustfs"
 
 RUSTFS_DOWNLOAD = {
-    "Windows": f"{_RUSTFS_BASE}/rustfs-release-x86_64-pc-windows-msvc.zip",
-    "Darwin":  f"{_RUSTFS_BASE}/rustfs-release-x86_64-apple-darwin.zip",
-    # arm64 macOS (Apple Silicon) — override at runtime if needed
+    "Windows":     f"{_RUSTFS_BASE}/rustfs-release-x86_64-pc-windows-msvc.zip",
+    "Darwin":      f"{_RUSTFS_BASE}/rustfs-release-x86_64-apple-darwin.zip",
     "Darwin_arm64": f"{_RUSTFS_BASE}/rustfs-release-aarch64-apple-darwin.zip",
-    "Linux":   f"{_RUSTFS_BASE}/rustfs-release-x86_64-unknown-linux-musl.zip",
+    "Linux":       f"{_RUSTFS_BASE}/rustfs-release-x86_64-unknown-linux-musl.zip",
 }
 
 # Bundled asset names (place in assets/ before building)
@@ -74,8 +74,9 @@ def _popen_kwargs() -> dict:
     return {}
 
 
+# ── Path helpers ──────────────────────────────────────────────────────────────
+
 def get_rustfs_dir() -> Path:
-    """Directory where the rustfs binary lives."""
     from core.pg_manager import get_app_data_dir
     d = get_app_data_dir() / "rustfs-bin"
     d.mkdir(parents=True, exist_ok=True)
@@ -109,7 +110,6 @@ def is_binaries_available() -> bool:
 
 
 def _get_download_url() -> str:
-    """Return the correct download URL for the current platform/arch."""
     system = platform.system()
     if system == "Darwin":
         import platform as _pl
@@ -118,13 +118,15 @@ def _get_download_url() -> str:
     return RUSTFS_DOWNLOAD.get(system, "")
 
 
+# ── RustFSManager ─────────────────────────────────────────────────────────────
+
 class RustFSManager:
     """
     Manages the RustFS single-binary S3-compatible object storage server.
 
-    RustFS mirrors the MinIO interface (same env vars, same port defaults,
-    same S3/IAM API) making it a drop-in replacement for both MinIO and
-    SeaweedFS in the PGOps stack.
+    RustFS is configured entirely through environment variables (RUSTFS_*).
+    It is launched as a subprocess; the process handles its own internal
+    routing between S3 API and the web console.
     """
 
     API_PORT     = 9000   # S3 API  (same default as MinIO)
@@ -150,20 +152,17 @@ class RustFSManager:
 
     @property
     def api_port(self) -> int:
-        """Internal S3 API port."""
-        return self.config.get("rustfs_api_port", self.API_PORT)
+        return int(self.config.get("rustfs_api_port", self.API_PORT))
 
     @property
     def console_port(self) -> int:
-        """Internal web console port."""
-        return self.config.get("rustfs_console_port", self.CONSOLE_PORT)
+        return int(self.config.get("rustfs_console_port", self.CONSOLE_PORT))
 
     @property
     def https_port(self) -> int:
-        """Caddy HTTPS port — used to build the public-facing URLs."""
-        return self.config.get("caddy_https_port", 8443)
+        return int(self.config.get("caddy_https_port", 8443))
 
-    # Back-compat: old callers that read s3_port / filer_port still work.
+    # Back-compat properties so old callers using s3_port/filer_port still work
     @property
     def s3_port(self) -> int:
         return self.api_port
@@ -181,9 +180,9 @@ class RustFSManager:
         """
         Extract the rustfs binary from assets/ if available, otherwise
         download from the RustFS release CDN.
+        Each release ZIP contains a single rustfs[.exe] binary.
         """
-        system  = platform.system()
-        dest    = rustfs_bin()
+        dest = rustfs_bin()
 
         if dest.exists():
             self.log("RustFS binary already available.")
@@ -192,6 +191,7 @@ class RustFSManager:
             return True, "RustFS binary ready."
 
         # ── Try bundled asset first ────────────────────────────────────────
+        system       = platform.system()
         bundled_name = RUSTFS_BUNDLED.get(system, "")
         if bundled_name:
             bundled = get_assets_dir() / bundled_name
@@ -209,14 +209,18 @@ class RustFSManager:
         if not url:
             return False, f"No download URL configured for RustFS on {system}."
 
+        if not _HAS_REQUESTS:
+            return False, (
+                "The 'requests' package is required to download RustFS.\n"
+                "Run: pip install requests"
+            )
+
         self.log(f"Downloading RustFS from {url}…")
         try:
-            import zipfile, tempfile
-
             if progress_callback:
                 progress_callback(5)
 
-            resp = requests.get(url, stream=True, timeout=180)
+            resp = _requests.get(url, stream=True, timeout=180)
             resp.raise_for_status()
             total      = int(resp.headers.get("content-length", 0))
             downloaded = 0
@@ -229,7 +233,7 @@ class RustFSManager:
                     if progress_callback and total:
                         progress_callback(5 + int(downloaded / total * 80))
 
-            # Extract — the ZIP contains a single "rustfs[.exe]" binary
+            # Extract the single binary from the ZIP
             extract_dir = get_rustfs_dir() / "_extract"
             extract_dir.mkdir(exist_ok=True)
 
@@ -253,13 +257,27 @@ class RustFSManager:
             Path(tmp_path).unlink(missing_ok=True)
             return False, "RustFS binary not found inside downloaded archive."
 
-        except Exception as e:
-            return False, f"Failed to download RustFS: {e}"
+        except Exception as exc:
+            return False, f"Failed to download RustFS: {exc}"
 
     # ── Server lifecycle ──────────────────────────────────────────────────────
 
     def is_running(self) -> bool:
-        """Check if RustFS is listening on its internal S3 API port."""
+        """
+        Primary check: hit the /health endpoint.
+        Falls back to a bare TCP connect if the HTTP call fails (e.g. during
+        very early startup before the HTTP stack is ready).
+        """
+        # Try the dedicated health endpoint first (most reliable)
+        try:
+            import urllib.request
+            url = f"http://127.0.0.1:{self.api_port}/health"
+            with urllib.request.urlopen(url, timeout=1) as r:
+                return r.status == 200
+        except Exception:
+            pass
+
+        # Fallback: bare TCP connect
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.settimeout(1)
@@ -278,47 +296,56 @@ class RustFSManager:
             return False, "RustFS binary not found. Run setup first."
 
         data_dir = get_data_dir()
-        log_path = data_dir.parent / "rustfs.log"
+        log_dir  = data_dir.parent / "rustfs-logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
 
+        # RustFS is configured entirely via environment variables.
+        # Do NOT pass data paths as positional arguments — that is MinIO syntax.
         env = {
             **os.environ,
-            # RustFS uses the same environment variables as MinIO
-            "RUSTFS_VOLUMES":          str(data_dir),
-            "RUSTFS_ACCESS_KEY":       self.admin_user,
-            "RUSTFS_SECRET_KEY":       self.admin_password,
-            # Fallback: some builds also accept the MinIO env-var names
-            "MINIO_ROOT_USER":         self.admin_user,
-            "MINIO_ROOT_PASSWORD":     self.admin_password,
+            # Required: where to store data
+            "RUSTFS_VOLUMES":         str(data_dir),
+            # Network
+            "RUSTFS_ADDRESS":         f"127.0.0.1:{self.api_port}",
+            "RUSTFS_CONSOLE_ADDRESS": f"127.0.0.1:{self.console_port}",
+            "RUSTFS_CONSOLE_ENABLE":  "true",
+            # Auth
+            "RUSTFS_ACCESS_KEY":      self.admin_user,
+            "RUSTFS_SECRET_KEY":      self.admin_password,
+            # CORS — allow requests from any origin (LAN access)
+            "RUSTFS_CORS_ALLOWED_ORIGINS":         "*",
+            "RUSTFS_CONSOLE_CORS_ALLOWED_ORIGINS": "*",
+            # Logging
+            "RUSTFS_OBS_LOGGER_LEVEL":             "warn",
+            "RUSTFS_OBS_LOG_DIRECTORY":            str(log_dir),
         }
 
-        cmd = [
-            str(rustfs_bin()),
-            "server",
-            str(data_dir),
-            "--address",         f"127.0.0.1:{self.api_port}",
-            "--console-address", f"127.0.0.1:{self.console_port}",
-        ]
+        # The binary is invoked with no positional arguments; all config
+        # comes from the environment variables set above.
+        cmd = [str(rustfs_bin())]
 
+        log_path = data_dir.parent / "rustfs.log"
         try:
+            log_file        = open(log_path, "a", encoding="utf-8", errors="replace")
             kwargs          = _popen_kwargs()
             kwargs["env"]   = env
-            try:
-                log_file        = open(log_path, "a", encoding="utf-8", errors="replace")
-                kwargs["stdout"] = log_file
-                kwargs["stderr"] = log_file
-            except Exception:
-                kwargs["stdout"] = subprocess.DEVNULL
-                kwargs["stderr"] = subprocess.DEVNULL
+            kwargs["stdout"] = log_file
+            kwargs["stderr"] = log_file
             self._proc = subprocess.Popen(cmd, **kwargs)
-        except Exception as e:
-            return False, f"Failed to start RustFS: {e}"
+        except Exception as exc:
+            return False, f"Failed to start RustFS: {exc}"
 
-        # Poll until the S3 port accepts connections (up to 20 s)
+        # Poll the /health endpoint until it responds or we time out (20 s)
+        self.log(f"Waiting for RustFS health endpoint on port {self.api_port}…")
         for _ in range(40):
             time.sleep(0.5)
             if self.is_running():
-                self.log(f"RustFS started on port {self.api_port}.")
+                self.log(f"RustFS started — S3 API on port {self.api_port}.")
                 return True, f"RustFS started on port {self.api_port}."
+
+            # Check for immediate exit (bad config, port conflict, etc.)
+            if self._proc.poll() is not None:
+                break
 
         # Surface last log lines to help diagnose startup failures
         hint = ""
@@ -331,7 +358,16 @@ class RustFSManager:
         except Exception:
             pass
 
-        return False, f"RustFS did not start in time (log: {log_path}){hint}"
+        rc = self._proc.poll()
+        if rc is not None:
+            return False, (
+                f"RustFS exited immediately (code {rc}).\n"
+                f"Common causes: port {self.api_port}/{self.console_port} already in use, "
+                f"or insufficient disk space.{hint}"
+            )
+        return False, (
+            f"RustFS did not become healthy within 20 s (log: {log_path}){hint}"
+        )
 
     def stop(self) -> tuple[bool, str]:
         if not self.is_running():
@@ -347,12 +383,15 @@ class RustFSManager:
         if self._proc:
             try:
                 self._proc.terminate()
-                self._proc.wait(timeout=5)
-            except Exception:
+                self._proc.wait(timeout=8)
+            except subprocess.TimeoutExpired:
                 try:
                     self._proc.kill()
+                    self._proc.wait(timeout=3)
                 except Exception:
                     pass
+            except Exception:
+                pass
             self._proc = None
 
         # Fall back to system-wide kill if still listening
@@ -363,51 +402,36 @@ class RustFSManager:
                     capture_output=True, **_popen_kwargs(),
                 )
             else:
-                subprocess.run(["pkill", "-f", "rustfs server"], capture_output=True)
+                subprocess.run(["pkill", "-f", "rustfs"], capture_output=True)
 
         self.log("RustFS stopped.")
         return True, "RustFS stopped."
 
     # ── URL helpers ───────────────────────────────────────────────────────────
-    #
-    # Rule: anything shown to the user or written into .env files uses the
-    # HTTPS Caddy subdomain. The raw internal URL is only for health checks.
 
     def _caddy_base(self, subdomain: str) -> str:
-        """Return https://<subdomain>[:<port>] (port omitted when 443)."""
         port = self.https_port
         if port == 443:
             return f"https://{subdomain}"
         return f"https://{subdomain}:{port}"
 
     def api_url(self) -> str:
-        """
-        Public HTTPS URL for the RustFS S3 API — use this in .env files.
-        Goes through Caddy → mkcert TLS.
-        Caddy subdomain: s3.pgops.local
-        """
+        """Public HTTPS URL for the RustFS S3 API (via Caddy). Use in .env files."""
         return self._caddy_base("s3.pgops.local")
 
     def console_url(self) -> str:
-        """
-        Public HTTPS URL for the RustFS web console — open in browser.
-        Goes through Caddy → mkcert TLS.
-        Caddy subdomain: console.pgops.local
-        """
+        """Public HTTPS URL for the RustFS web console (via Caddy)."""
         return self._caddy_base("console.pgops.local")
 
     def internal_api_url(self) -> str:
-        """Raw internal S3 URL used only by health checks."""
+        """Raw internal HTTP URL — only for health checks and mc alias setup."""
         return f"http://127.0.0.1:{self.api_port}"
 
-    # Back-compat wrappers so callers using old names still compile.
+    # Back-compat wrappers
     def endpoint_url(self, use_local: bool = False) -> str:
         return self.api_url()
 
-    # ── Bucket policy helpers ─────────────────────────────────────────────────
-    # RustFS exposes a standard S3 bucket-policy REST API, identical to
-    # MinIO and SeaweedFS.  All operations go through bucket_manager.py which
-    # uses AWS SigV4-signed requests — no separate client binary needed.
+    # ── Bucket policy helpers (standard S3 bucket-policy REST API) ────────────
 
     def _s3_request(
         self,
@@ -416,21 +440,21 @@ class RustFSManager:
         params:  dict = None,
         data:    bytes = None,
         headers: dict = None,
-    ) -> requests.Response:
-        """Issue a raw request against the internal RustFS S3 endpoint."""
+    ):
+        """Issue a raw authenticated request against the internal RustFS S3 endpoint."""
+        if not _HAS_REQUESTS:
+            raise RuntimeError("requests package required")
         url = f"http://127.0.0.1:{self.api_port}{path}"
-        return requests.request(
-            method,
-            url,
-            params=params,
-            data=data,
+        return _requests.request(
+            method, url,
+            params=params, data=data,
             headers=headers or {},
             auth=(self.admin_user, self.admin_password),
             timeout=10,
         )
 
     def set_bucket_public(self, bucket: str) -> tuple[bool, str]:
-        """Make a bucket publicly readable (anonymous GET/LIST allowed)."""
+        """Make a bucket publicly readable (anonymous GET allowed)."""
         import json
         policy = {
             "Version": "2012-10-17",
@@ -451,21 +475,21 @@ class RustFSManager:
             if r.status_code in (200, 204):
                 return True, f"Bucket '{bucket}' is now public (read-only)."
             return False, f"HTTP {r.status_code}: {r.text.strip()}"
-        except Exception as e:
-            return False, str(e)
+        except Exception as exc:
+            return False, str(exc)
 
     def set_bucket_private(self, bucket: str) -> tuple[bool, str]:
-        """Make a bucket private (no anonymous access)."""
+        """Remove the bucket policy (reverts to private / authenticated-only)."""
         try:
             r = self._s3_request("DELETE", f"/{bucket}", params={"policy": ""})
             if r.status_code in (200, 204):
                 return True, f"Bucket '{bucket}' is now private."
             return False, f"HTTP {r.status_code}: {r.text.strip()}"
-        except Exception as e:
-            return False, str(e)
+        except Exception as exc:
+            return False, str(exc)
 
     def get_bucket_policy(self, bucket: str) -> str:
-        """Return 'public' or 'private'."""
+        """Return 'public' or 'private' by inspecting the S3 bucket policy."""
         try:
             r = self._s3_request("GET", f"/{bucket}", params={"policy": ""})
             if r.status_code == 200:
@@ -487,22 +511,17 @@ class RustFSManager:
         folder = folder.strip("/")
         if not folder:
             return False, "Folder name cannot be empty."
-        key = f"{folder}/.keep"
         try:
-            r = self._s3_request("PUT", f"/{bucket}/{key}", data=b"")
+            r = self._s3_request("PUT", f"/{bucket}/{folder}/.keep", data=b"")
             if r.status_code in (200, 201):
                 return True, f"Folder '{folder}' created in '{bucket}'."
             return False, f"HTTP {r.status_code}: {r.text.strip()}"
-        except Exception as e:
-            return False, str(e)
+        except Exception as exc:
+            return False, str(exc)
 
     def list_folders(self, bucket: str, prefix: str = "") -> list[str]:
-        """List immediate sub-folders (common prefixes) in a bucket/prefix."""
-        params: dict = {
-            "list-type": "2",
-            "delimiter":  "/",
-            "max-keys":   "1000",
-        }
+        """List immediate sub-folders (common prefixes) via ListObjectsV2."""
+        params: dict = {"list-type": "2", "delimiter": "/", "max-keys": "1000"}
         if prefix:
             params["prefix"] = prefix.strip("/") + "/"
         try:
@@ -525,7 +544,7 @@ class RustFSManager:
             return []
 
     def delete_folder(self, bucket: str, folder: str) -> tuple[bool, str]:
-        """Recursively delete a folder (prefix) and all objects under it."""
+        """Recursively delete a folder and all objects under it via multi-delete."""
         folder = folder.strip("/") + "/"
         if folder == "/":
             return False, "Folder name cannot be empty."
@@ -567,8 +586,8 @@ class RustFSManager:
             if dr.status_code in (200, 204):
                 return True, f"Folder '{folder.rstrip('/')}' deleted from '{bucket}'."
             return False, f"Delete failed: HTTP {dr.status_code}: {dr.text.strip()}"
-        except Exception as e:
-            return False, str(e)
+        except Exception as exc:
+            return False, str(exc)
 
     # ── Connection info ───────────────────────────────────────────────────────
 

@@ -1083,7 +1083,7 @@ class FilesTab(QWidget):
 
     def __init__(self, rustfs_manager, parent=None):
         super().__init__(parent)
-        self.minio    = rustfs_manager
+        self.rustfs    = rustfs_manager
         self._workers = []
         self._build_ui()
 
@@ -1142,7 +1142,7 @@ class FilesTab(QWidget):
 
         self.btn_start   = _btn("▶  Start",   "#166534", "#15803d", "#86efac", h=32)
         self.btn_stop    = _btn("■  Stop",    "#7f1d1d", "#991b1b", "#fca5a5", h=32)
-        self.btn_console = _btn("Open Filer UI →", C_SURF2, C_BORDER2, C_TEXT2, h=32)
+        self.btn_console = _btn("Open Console →", C_SURF2, C_BORDER2, C_TEXT2, h=32)
         self.btn_setup   = _btn("⚙ Setup", "#78350f", "#92400e", "#fef3c7", h=32)
 
         self.btn_start.clicked.connect(self._start)
@@ -1213,12 +1213,12 @@ class FilesTab(QWidget):
 
     def _on_bucket_selected(self, bucket: str):
         self._browser.load_bucket(bucket)
-        self._cred_panel.load(bucket, self.minio.api_url())
+        self._cred_panel.load(bucket, self.rustfs.api_url())
 
     # ── Server controls ───────────────────────────────────────────────────────
 
     def _start(self):
-        if not self.minio.is_binaries_available():
+        if not self.rustfs.is_binaries_available():
             QMessageBox.information(self, "Setup Required",
                 "Click '⚙ Setup' first to download the RustFS binary.")
             return
@@ -1227,7 +1227,7 @@ class FilesTab(QWidget):
         self.endpoint_lbl.setText("Starting…")
 
         def fn(_prog):
-            return self.minio.start()
+            return self.rustfs.start()
 
         def done(ok, msg):
             self.btn_start.setEnabled(True)
@@ -1248,7 +1248,7 @@ class FilesTab(QWidget):
         self.btn_start.setEnabled(False)
 
         def fn(_prog):
-            return self.minio.stop()
+            return self.rustfs.stop()
 
         def done(ok, msg):
             self.btn_stop.setEnabled(True)
@@ -1265,7 +1265,7 @@ class FilesTab(QWidget):
         self.btn_setup.setEnabled(False)
 
         def fn(prog_cb):
-            return self.minio.setup_binaries(progress_callback=prog_cb)
+            return self.rustfs.setup_binaries(progress_callback=prog_cb)
 
         def done(ok, msg):
             self.prog.setVisible(False)
@@ -1281,11 +1281,11 @@ class FilesTab(QWidget):
 
     def _open_console(self):
         import webbrowser, socket as _socket
-        if not self.minio.is_running():
+        if not self.rustfs.is_running():
             QMessageBox.information(self, "Storage Not Running",
                 "Start RustFS first.")
             return
-        caddy_port = self.minio.https_port
+        caddy_port = self.rustfs.https_port
         caddy_up = False
         try:
             s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
@@ -1295,14 +1295,14 @@ class FilesTab(QWidget):
         except Exception:
             pass
         if caddy_up:
-            url = self.minio.console_url()
+            url = self.rustfs.console_url()
         else:
-            url = f"http://127.0.0.1:{self.minio.filer_port}"
+            url = f"http://127.0.0.1:{self.rustfs.console_port}"
         webbrowser.open(url)
 
     def _update_status(self):
-        running  = self.minio.is_running()
-        binaries = self.minio.is_binaries_available()
+        running  = self.rustfs.is_running()
+        binaries = self.rustfs.is_binaries_available()
 
         if running:
             self.server_badge.setText("● RUNNING")
@@ -1310,7 +1310,7 @@ class FilesTab(QWidget):
                 f"color:{C_GREEN};font-size:11px;background:transparent;"
             )
             self.endpoint_lbl.setText(
-                f"API: {self.minio.api_url()}    Console: {self.minio.console_url()}"
+                f"API: {self.rustfs.api_url()}    Console: {self.rustfs.console_url()}"
             )
             self.btn_setup.setVisible(False)
         else:
@@ -1324,7 +1324,7 @@ class FilesTab(QWidget):
     # ── Bucket operations ─────────────────────────────────────────────────────
 
     def _create_bucket(self):
-        if not self.minio.is_running():
+        if not self.rustfs.is_running():
             QMessageBox.warning(self, "Storage Not Running",
                 "Start RustFS first.")
             return
@@ -1333,7 +1333,7 @@ class FilesTab(QWidget):
             return
 
         bucket_name, app_name, is_public = dlg.values()
-        endpoint = self.minio.api_url()
+        endpoint = self.rustfs.api_url()
 
         from core.bucket_manager import create_bucket
         ok, msg, creds = create_bucket(bucket_name, app_name, is_public)
@@ -1381,8 +1381,8 @@ class FilesTab(QWidget):
         from core.bucket_manager import rotate_keys
         ok, msg, new_creds = rotate_keys(bucket, old_ak)
         if ok:
-            self._cred_panel.load(bucket, self.minio.api_url())
-            CredentialsDialog(new_creds, self.minio.api_url(), self).exec()
+            self._cred_panel.load(bucket, self.rustfs.api_url())
+            CredentialsDialog(new_creds, self.rustfs.api_url(), self).exec()
         else:
             QMessageBox.critical(self, "Error", msg)
 
