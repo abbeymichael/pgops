@@ -50,6 +50,10 @@ from core.app_manager import load_apps
 from core.api_server import APIServer
 from core.landing_server import LandingServer
 
+# Phase 3 — Deterministic orchestration
+from core.orchestrator import ServiceOrchestrator, State, STATE_LABEL, STATE_COLOR
+from core.preflight import PreflightReport
+
 from ui.tab_activity import ActivityTab
 from ui.tab_server import ServerTab
 from ui.tab_databases import DatabasesTab
@@ -163,6 +167,39 @@ class MainWindow(QMainWindow):
             log_fn=self._log,
         )
 
+        # ── Phase 3 — Service Orchestrator ───────────────────────────────────
+        # Build starters / stoppers maps that the orchestrator will call.
+        # Each starter/stopper must be a zero-argument callable returning
+        # (bool, str).  The orchestrator owns the ordering and pre-flight.
+        self._orch_starters = {
+            "landing":    lambda: self.landing_srv.start(),
+            "api":        lambda: self.api_server.start(),
+            "seaweedfs":  lambda: self.minio.start() if self.minio.is_binaries_available() else (True, "SeaweedFS binary not installed — skipped."),
+            "pgadmin":    lambda: self.pgadmin.start(caddy_https_port=self.caddy.https_port) if self.pgadmin.is_available() else (True, "pgAdmin not available — skipped."),
+            "caddy":      self._orch_start_caddy,
+            "apps":       self._orch_start_apps,
+            # "postgres" is intentionally absent — started explicitly by the
+            # user via the START SERVER button (or autostart).  The orchestrator
+            # still monitors its health after it's up.
+        }
+        self._orch_stoppers = {
+            "apps":       lambda: (self.app_procs.stop_all(), "Apps stopped.")[1] or (True, "Apps stopped."),
+            "caddy":      lambda: self.caddy.stop(),
+            "pgadmin":    lambda: self.pgadmin.stop(),
+            "seaweedfs":  lambda: self.minio.stop(),
+            "api":        lambda: self.api_server.stop(),
+            "landing":    lambda: self.landing_srv.stop(),
+        }
+
+        self.orchestrator = ServiceOrchestrator(
+            config          = self.config,
+            starters        = self._orch_starters,
+            stoppers        = self._orch_stoppers,
+            data_dirs       = [get_app_data_dir()],
+            log_fn          = self._log,
+            on_state_change = self._on_orch_state_change,
+        )
+
         self.setWindowTitle("PGOps")
         self.setMinimumSize(1060, 700)
         self.resize(1240, 800)
@@ -182,27 +219,88 @@ class MainWindow(QMainWindow):
         if self.scheduler.schedule.get("enabled"):
             self.scheduler.start()
 
-        # Staggered Phase 2 startup
-        QTimer.singleShot(500, self._auto_start_mdns)
-        QTimer.singleShot(600, self._start_mdns_server)  # mDNS .local broadcast
-        QTimer.singleShot(700, self._start_landing_server)
-        QTimer.singleShot(800, self._start_api_server)
-        QTimer.singleShot(2000, self._start_caddy_and_apps)
+        # ── Orchestrated infrastructure startup (replaces staggered timers) ──
+        # mDNS broadcasters start immediately (no port conflicts possible).
+        QTimer.singleShot(300, self._auto_start_mdns)
+        QTimer.singleShot(400, self._start_mdns_server)
+        # Orchestrator handles landing, api, seaweedfs, caddy, apps in order.
+        QTimer.singleShot(600, self._orchestrate_infrastructure)
 
-    # ── Phase 2 startup helpers ───────────────────────────────────────────────
+    # ── Orchestrator starters (called by ServiceOrchestrator) ────────────────
+
+    def _orch_start_caddy(self):
+        """Caddy starter: start app processes first, then Caddy."""
+        apps = load_apps()
+        running_apps = [a for a in apps if a.get("status") == "running"]
+        if running_apps:
+            results = self.app_procs.start_all(running_apps)
+            for app_id, ok, msg in results:
+                self._log(f"[App:{app_id}] {msg}")
+        if not self.caddy.is_available():
+            return True, "Caddy binary not installed — skipped."
+        return self.caddy.start(apps, pgadmin_running=self.pgadmin.is_running())
+
+    def _orch_start_apps(self):
+        """Apps starter: start any marked-running apps (Caddy already up)."""
+        if not is_frankenphp_available():
+            return True, "FrankenPHP not installed — app processes skipped."
+        apps = [a for a in load_apps() if a.get("status") == "running"]
+        if apps:
+            self.app_procs.start_all(apps)
+        return True, f"Started {len(apps)} app process(es)."
+
+    def _orchestrate_infrastructure(self):
+        """
+        Kick off the orchestrated infrastructure startup sequence.
+        Replaces the old staggered QTimer.singleShot chain with a single
+        pre-flight + dependency-ordered startup run.
+        """
+        self._log("[Orchestrator] Beginning infrastructure startup sequence…")
+        report = self.orchestrator.start_all()
+        # Surface any pre-flight warnings in the UI after the Qt event loop
+        # has had a chance to show the main window.
+        if report.port_conflicts or report.permission_issues:
+            QTimer.singleShot(500, lambda: self._show_preflight_warnings(report))
+        # Start background health monitor
+        self.orchestrator.start_monitoring(interval=5.0)
+
+    def _show_preflight_warnings(self, report: PreflightReport):
+        """Show a non-blocking warning dialog for pre-flight issues."""
+        lines = report.summary_lines()
+        if not lines:
+            return
+        msg = "\n".join(lines)
+        QMessageBox.warning(
+            self,
+            "Service Start Warnings",
+            f"PGOps detected issues before starting services:\n\n{msg}\n\n"
+            "Affected services have been skipped. Fix the issues above and "
+            "use the individual Start buttons to retry.",
+        )
+
+    def _on_orch_state_change(self, service_id: str, state):
+        """
+        Called from the orchestrator background thread when a service changes
+        state.  Must post UI updates back to the Qt main thread.
+        """
+        # Use a zero-delay timer to hop back to the Qt main thread safely.
+        QTimer.singleShot(0, lambda: self._apply_orch_state(service_id, state))
+
+    def _apply_orch_state(self, service_id: str, state):
+        """Update any relevant UI widgets when orchestrator state changes."""
+        if hasattr(self, "_srv_tab"):
+            self._srv_tab.update_orch_state(service_id, state)
+
+    # ── Phase 2 / mDNS helpers ────────────────────────────────────────────────
 
     def _start_mdns_server(self):
         """Start the MDNSServer and register all PGOps service subdomains."""
         ok, msg = self.mdns_server.start()
         self._log(msg)
 
-        # Register the fixed infrastructure subdomains so LAN devices can
-        # resolve s3.pgops.local, filer.pgops.local, pgadmin.pgops.local
-        # in addition to app-specific subdomains.
         for hostname in ("s3.pgops", "filer.pgops", "pgadmin.pgops"):
             self.mdns_server.register_app("", domain=f"{hostname}.local")
 
-        # Register any already-deployed apps
         for app in load_apps():
             domain = app.get("domain", "")
             if domain:
@@ -210,29 +308,6 @@ class MainWindow(QMainWindow):
 
         if hasattr(self, "_dns_tab"):
             self._dns_tab.refresh()
-
-    def _start_landing_server(self):
-        ok, msg = self.landing_srv.start()
-        self._log(msg)
-
-    def _start_api_server(self):
-        ok, msg = self.api_server.start()
-        self._log(msg)
-
-    def _start_caddy_and_apps(self):
-        apps = load_apps()
-        running_apps = [a for a in apps if a.get("status") == "running"]
-        if running_apps:
-            results = self.app_procs.start_all(running_apps)
-            for app_id, ok, msg in results:
-                self._log(f"[App:{app_id}] {msg}")
-        if self.caddy.is_available():
-            # pgadmin_running flag kept for compat but no longer controls the
-            # pgadmin block — it is always written in generate_caddyfile()
-            ok, msg = self.caddy.start(apps, pgadmin_running=self.pgadmin.is_running())
-            self._log(msg)
-        else:
-            self._log("[Caddy] Binary not found — click Setup Caddy in the Server tab.")
 
     def _initial_load(self):
         self._poll()
@@ -481,15 +556,11 @@ class MainWindow(QMainWindow):
     def _quit(self):
         self.scheduler.stop()
         self.mdns.stop()
-        self.mdns_server.stop()  # stop mDNS .local broadcast
-        self.app_procs.stop_all()
-        self.caddy.stop()
-        self.api_server.stop()
-        self.landing_srv.stop()
-        if self.minio.is_running():
-            self.minio.stop()
-        if self.pgadmin.is_running():
-            self.pgadmin.stop()
+        self.mdns_server.stop()
+        self.orchestrator.stop_monitoring()
+        # Orchestrated shutdown (reverse dependency order)
+        self.orchestrator.stop_all()
+        # PostgreSQL is outside the orchestrator's managed set — stop it last
         if self.manager.is_running() and not service_exists():
             self.manager.stop()
         QApplication.quit()
@@ -514,34 +585,24 @@ class MainWindow(QMainWindow):
             self._load_databases_async()
             self._backup_tab.refresh_backup_list()
             self._ssl_tab.refresh_status()
-            if not self.minio.is_running() and self.minio.is_binaries_available():
+            # Notify the orchestrator that postgres is now healthy so it can
+            # start dependent services (pgadmin, caddy, apps) in order.
+            # We start each via the orchestrator so pre-flight runs first.
+            def _start_dependents(_p):
+                results = []
+                for sid in ("seaweedfs", "pgadmin", "caddy", "apps"):
+                    st = self.orchestrator.get_state(sid)
+                    if st and st.state.name in ("HEALTHY",):
+                        continue  # already up
+                    o, m = self.orchestrator.start_service(sid)
+                    results.append((sid, o, m))
+                    self._log(f"[{sid}] {m}")
+                return True, "Dependent services started."
 
-                def _sm(_p):
-                    return self.minio.start()
-
-                self._run(_sm, lambda ok, msg: self._log(f"[SeaweedFS] {msg}"))
-            if not self.pgadmin.is_running() and self.pgadmin.is_available():
-
-                def _spa(_p):
-                    # Pass the Caddy HTTPS port so pgAdmin's config_local.py
-                    # gets the correct public URL for CSRF validation
-                    return self.pgadmin.start(caddy_https_port=self.caddy.https_port)
-
-                self._run(
-                    _spa,
-                    lambda ok, msg: (
-                        self._log(f"[pgAdmin] {msg}"),
-                        self._update_pgadmin_status(),
-                        # Reload Caddy so pgadmin subdomain is live
-                        (
-                            self.caddy.update_apps(load_apps())
-                            if self.caddy.is_running()
-                            else None
-                        ),
-                    ),
-                )
-            if not self.caddy.is_running():
-                QTimer.singleShot(500, self._start_caddy_and_apps)
+            self._run(
+                _start_dependents,
+                lambda o, m: (self._log(m), self._poll(), self._update_pgadmin_status()),
+            )
 
     def _stop(self):
         self._srv_tab.btn_stop.setEnabled(False)
@@ -597,7 +658,6 @@ class MainWindow(QMainWindow):
 
     def _start_seaweedfs(self):
         if not self.minio.is_binaries_available():
-            from PyQt6.QtWidgets import QMessageBox
             QMessageBox.information(
                 self, "Setup Required",
                 "Click \"Setup\" in the SeaweedFS card first to download the binary.",
@@ -606,17 +666,23 @@ class MainWindow(QMainWindow):
         self._srv_tab.btn_swfs_start.setEnabled(False)
 
         def fn(_p):
-            return self.minio.start()
+            # Use the orchestrator so pre-flight runs (port check + stale sockets)
+            ok, msg = self.orchestrator.start_service("seaweedfs")
+            return ok, msg
 
         def done(ok, msg):
             self._srv_tab.btn_swfs_start.setEnabled(True)
             self._log(f"[SeaweedFS] {msg}")
             if not ok:
-                from PyQt6.QtWidgets import QMessageBox
                 QMessageBox.critical(
                     self, "SeaweedFS Failed to Start",
-                    f"{msg}\n\nCheck the log file at:\n"
-                    "  <AppData>/seaweedfs.log",
+                    f"{msg}\n\n"
+                    "Common causes:\n"
+                    "• A previous SeaweedFS process is still running (port 8333/8888/9333 busy).\n"
+                    "  → Open Task Manager and end 'weed.exe', then try again.\n"
+                    "• Stale socket files from a crash.\n"
+                    "  → PGOps will clean these automatically on the next attempt.\n\n"
+                    f"Log file: <AppData>\\seaweedfs.log",
                 )
             self._poll()
 
@@ -1088,6 +1154,34 @@ class MainWindow(QMainWindow):
         # Refresh DNS tab periodically
         if hasattr(self, "_dns_tab"):
             self._dns_tab.refresh()
+
+        # ── Sync PostgreSQL state into the orchestrator panel ─────────────────
+        # PostgreSQL is not managed by the orchestrator's start_service() flow
+        # (it's started manually), so we push its live state into the panel
+        # via the same state-change callback mechanism.
+        if hasattr(self, "orchestrator") and hasattr(self, "_srv_tab"):
+            self._sync_postgres_orch_state(running)
+
+    def _sync_postgres_orch_state(self, pg_running: bool):
+        """
+        Push the live PostgreSQL running/stopped state into the orchestrator
+        panel.  PostgreSQL is started manually (not via orchestrator.start_service),
+        so we synthesise a ServiceState here to keep the panel accurate.
+        """
+        from core.orchestrator import ServiceState, State
+        st = ServiceState(service_id="postgres")
+        if pg_running:
+            st.state   = State.HEALTHY
+            st.message = (
+                f"Running on port {self.config.get('port', 5432)}"
+            )
+        elif self.manager.is_binaries_available():
+            st.state   = State.STOPPED
+            st.message = "Stopped — click START SERVER to launch."
+        else:
+            st.state   = State.SKIPPED
+            st.message = "Binaries not installed — click Setup PostgreSQL."
+        self._srv_tab.update_orch_state("postgres", st)
 
     # ── Logging ───────────────────────────────────────────────────────────────
 

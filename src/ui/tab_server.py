@@ -1,16 +1,24 @@
 """
-tab_server.py  — Phase 2 edition
-Adds Caddy and FrankenPHP infrastructure cards below the pgAdmin card.
-pgAdmin card shows https://pgadmin.pgops.local (via Caddy) not the raw port.
+tab_server.py  — Phase 3 edition
+Adds Orchestrator status panel at the top of the Server tab.
+Shows every service's lifecycle state (declared → preflight → starting → healthy
+→ degraded → stopped / failed / skipped) so the user always knows *why* something
+didn't start — never just "it didn't work".
 """
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QProgressBar, QScrollArea, QFrame, QTextEdit, QSizePolicy, QApplication,
+    QGridLayout,
 )
 from PyQt6.QtCore import Qt, QTimer
 from ui.theme import *
 from ui.widgets import CopyField, ConnField, PulseDot, mk_lbl, mk_sep
+
+# Orchestrator state labels/colours imported lazily to avoid circular imports
+_ORCH_IMPORTED = False
+_STATE_LABEL   = {}
+_STATE_COLOR   = {}
 
 
 def _card(parent=None):
@@ -114,16 +122,20 @@ class ServerTab(QWidget):
         row2.addWidget(self._logs_card(), 5)
         bv.addLayout(row2)
 
-        # Row 3 – SeaweedFS object storage
+        # Row 3 – Orchestrator status panel
+        self._orch_card_widget = self._orch_card()
+        bv.addWidget(self._orch_card_widget)
+
+        # Row 4 – SeaweedFS object storage
         bv.addWidget(self._seaweedfs_card())
 
-        # Row 4 – pgAdmin
+        # Row 5 – pgAdmin
         bv.addWidget(self._pgadmin_card())
 
-        # Row 5 – Caddy
+        # Row 6 – Caddy
         bv.addWidget(self._caddy_card())
 
-        # Row 6 – FrankenPHP
+        # Row 7 – FrankenPHP
         bv.addWidget(self._frankenphp_card())
 
         scroll.setWidget(body)
@@ -1023,3 +1035,146 @@ class ServerTab(QWidget):
         self._log_box.verticalScrollBar().setValue(
             self._log_box.verticalScrollBar().maximum()
         )
+
+    # ── Orchestrator status panel ─────────────────────────────────────────────
+
+    # Maps: service_id → (dot_label, state_label, msg_label)
+    _orch_rows: dict = {}
+
+    # Ordered list of (service_id, display_name) to show
+    _ORCH_SERVICES = [
+        ("postgres",   "PostgreSQL"),
+        ("landing",    "Landing Server"),
+        ("api",        "Internal API"),
+        ("seaweedfs",  "SeaweedFS"),
+        ("pgadmin",    "pgAdmin 4"),
+        ("caddy",      "Caddy"),
+        ("apps",       "App Processes"),
+    ]
+
+    def _orch_card(self):
+        card = _card()
+        v = QVBoxLayout(card)
+        v.setContentsMargins(22, 18, 22, 18)
+        v.setSpacing(10)
+
+        # Header
+        hdr = QHBoxLayout()
+        title = QLabel("Service Orchestrator")
+        title.setStyleSheet(
+            f"color:{C_TEXT};font-size:14px;font-weight:700;background:transparent;"
+        )
+        badge = QLabel("DECLARE → PREFLIGHT → START")
+        badge.setStyleSheet(
+            f"color:{C_TEXT3};background:{C_SURFACE2};"
+            f"border:1px solid {C_BORDER2};border-radius:4px;"
+            f"font-size:9px;font-weight:700;letter-spacing:1px;padding:3px 10px;"
+        )
+        hdr.addWidget(title)
+        hdr.addStretch()
+        hdr.addWidget(badge)
+        v.addLayout(hdr)
+
+        sub = QLabel(
+            "All services are declared with their ports and dependencies. "
+            "Pre-flight checks run before any service starts."
+        )
+        sub.setWordWrap(True)
+        sub.setStyleSheet(f"color:{C_TEXT3};font-size:11px;background:transparent;")
+        v.addWidget(sub)
+
+        # Grid: dot | name | state badge | message
+        grid = QGridLayout()
+        grid.setSpacing(6)
+        grid.setColumnStretch(2, 0)
+        grid.setColumnStretch(3, 1)
+
+        # Header row
+        for col, txt in enumerate(["SERVICE", "STATE", "DETAIL"]):
+            lh = QLabel(txt)
+            lh.setStyleSheet(
+                f"color:{C_TEXT3};font-size:9px;font-weight:700;"
+                f"letter-spacing:1.5px;background:transparent;"
+            )
+            grid.addWidget(lh, 0, col + 1)
+
+        self._orch_rows = {}
+        for row_i, (sid, display) in enumerate(self._ORCH_SERVICES, start=1):
+            dot = QLabel("●")
+            dot.setFixedWidth(14)
+            dot.setStyleSheet(f"color:#6b7280;font-size:10px;background:transparent;")
+
+            name_lbl = QLabel(display)
+            name_lbl.setStyleSheet(
+                f"color:{C_TEXT2};font-size:12px;background:transparent;"
+                f"font-family:'Consolas','Courier New',monospace;"
+            )
+            name_lbl.setFixedWidth(150)
+
+            state_lbl = QLabel("Declared")
+            state_lbl.setFixedWidth(90)
+            state_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            state_lbl.setStyleSheet(
+                f"color:#6b7280;background:{C_SURFACE2};"
+                f"border:1px solid {C_BORDER};border-radius:4px;"
+                f"font-size:9px;font-weight:700;letter-spacing:0.5px;"
+                f"padding:2px 8px;"
+            )
+
+            msg_lbl = QLabel("Waiting for orchestrator…")
+            msg_lbl.setStyleSheet(
+                f"color:{C_TEXT3};font-size:11px;background:transparent;"
+            )
+            msg_lbl.setWordWrap(False)
+
+            grid.addWidget(dot,       row_i, 0)
+            grid.addWidget(name_lbl,  row_i, 1)
+            grid.addWidget(state_lbl, row_i, 2)
+            grid.addWidget(msg_lbl,   row_i, 3)
+
+            self._orch_rows[sid] = (dot, state_lbl, msg_lbl)
+
+        v.addLayout(grid)
+        return card
+
+    def update_orch_state(self, service_id: str, state_obj):
+        """
+        Called from main_window._apply_orch_state (always on the Qt main thread)
+        to refresh a service row in the orchestrator panel.
+        """
+        global _ORCH_IMPORTED, _STATE_LABEL, _STATE_COLOR
+        if not _ORCH_IMPORTED:
+            try:
+                from core.orchestrator import STATE_LABEL, STATE_COLOR
+                _STATE_LABEL   = STATE_LABEL
+                _STATE_COLOR   = STATE_COLOR
+                _ORCH_IMPORTED = True
+            except Exception:
+                pass
+
+        row = self._orch_rows.get(service_id)
+        if not row:
+            return
+        dot, state_lbl, msg_lbl = row
+
+        state   = state_obj.state
+        color   = _STATE_COLOR.get(state, "#6b7280")
+        label   = _STATE_LABEL.get(state, str(state.name))
+        message = state_obj.message or ""
+
+        dot.setStyleSheet(
+            f"color:{color};font-size:10px;background:transparent;"
+        )
+        state_lbl.setText(label)
+        state_lbl.setStyleSheet(
+            f"color:{color};"
+            f"background:{color}18;"   # 18 = ~10% opacity hex
+            f"border:1px solid {color}50;"
+            f"border-radius:4px;"
+            f"font-size:9px;font-weight:700;letter-spacing:0.5px;"
+            f"padding:2px 8px;"
+        )
+        # Truncate long messages for the grid cell
+        display_msg = message[:90] + "…" if len(message) > 90 else message
+        msg_lbl.setText(display_msg)
+        msg_lbl.setToolTip(message)   # full text on hover
