@@ -29,7 +29,7 @@ Usage (from main_window.py)
     orch.start_all()
 
     # Start one service (pre-flight included)
-    orch.start_service("seaweedfs")
+    orch.start_service("rustfs")
 
     # Stop everything in reverse order
     orch.stop_all()

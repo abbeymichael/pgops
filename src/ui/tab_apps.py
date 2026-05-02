@@ -357,7 +357,7 @@ class DeployWizard(QDialog):
 
         # Hint label that updates with stack selection
         self._stack_hint = _lbl(
-            "Provisions PostgreSQL database, SeaweedFS S3 bucket, and PHP environment.",
+            "Provisions PostgreSQL database, RustFS S3 bucket, and PHP environment.",
             C_TEXT3, 11,
         )
         self._stack_hint.setWordWrap(True)
@@ -366,7 +366,7 @@ class DeployWizard(QDialog):
         def _update_stack_hint():
             if self._rb_stack_laravel.isChecked():
                 self._stack_hint.setText(
-                    "Provisions PostgreSQL database, SeaweedFS S3 bucket, and PHP environment."
+                    "Provisions PostgreSQL database, RustFS S3 bucket, and PHP environment."
                 )
             elif self._rb_stack_static.isChecked():
                 self._stack_hint.setText(
@@ -1715,7 +1715,7 @@ class AppsTab(QWidget):
         if is_laravel:
             extra_lines = (
                 f"  • Drop database '{app.get('database','')}' and its user\n"
-                f"  • Drop SeaweedFS bucket '{app.get('bucket','')}'\n"
+                f"  • Drop RustFS bucket '{app.get('bucket','')}'\n"
                 f"  • Remove the PHP ini configuration\n"
             )
 

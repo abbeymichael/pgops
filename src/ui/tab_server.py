@@ -33,21 +33,21 @@ def _card(parent=None):
 class ServerTab(QWidget):
     def __init__(
         self,
-        manager, config, seaweedfs, pgadmin,
+        manager, config, rustfs, pgadmin,
         on_start, on_stop, on_download,
         on_start_pgadmin, on_stop_pgadmin, on_open_pgadmin, on_reset_pgadmin,
         # Phase 2 callbacks
         on_setup_caddy, on_start_caddy, on_stop_caddy,
         on_setup_frankenphp, on_start_frankenphp, on_stop_frankenphp,
         caddy_manager, frankenphp_manager,
-        # SeaweedFS callbacks
-        on_setup_seaweedfs=None, on_start_seaweedfs=None, on_stop_seaweedfs=None,
+        # RustFS callbacks
+        on_setup_seaweedfs=None, on_start_seaweedfs=None, on_stop_seaweedfs=None,  # back-compat param names
         log_fn=None, parent=None,
     ):
         super().__init__(parent)
         self._manager    = manager
         self._config     = config
-        self._seaweedfs  = seaweedfs
+        self._rustfs     = rustfs
         self._pgadmin    = pgadmin
         self._caddy      = caddy_manager
         self._frankenphp = frankenphp_manager
@@ -126,7 +126,7 @@ class ServerTab(QWidget):
         self._orch_card_widget = self._orch_card()
         bv.addWidget(self._orch_card_widget)
 
-        # Row 4 – SeaweedFS object storage
+        # Row 4 – RustFS object storage
         bv.addWidget(self._seaweedfs_card())
 
         # Row 5 – pgAdmin
@@ -435,7 +435,7 @@ class ServerTab(QWidget):
     # ── pgAdmin card ──────────────────────────────────────────────────────────
 
     def _seaweedfs_card(self):
-        """Service card for SeaweedFS object storage (replaces MinIO)."""
+        """Service card for RustFS object storage (method kept as _seaweedfs_card for stability)."""
         card = _card()
         v = QVBoxLayout(card)
         v.setContentsMargins(22, 18, 22, 18)
@@ -443,7 +443,7 @@ class ServerTab(QWidget):
 
         # Header row
         hdr = QHBoxLayout()
-        t = QLabel("SeaweedFS — Object Storage (S3-compatible)")
+        t = QLabel("RustFS — Object Storage (S3-compatible)")
         t.setStyleSheet(
             f"color:{C_TEXT};font-size:14px;font-weight:700;background:transparent;"
         )
@@ -475,9 +475,9 @@ class ServerTab(QWidget):
 
         # Note about Caddy
         proxy_note = QLabel(
-            "ⓘ  S3 API and Filer UI are proxied via Caddy. "
+            "ⓘ  S3 API and Console are proxied via Caddy. "
             "Manage buckets from the Storage tab. "
-            "Log: <AppData>/seaweedfs.log"
+            "Log: <AppData>/rustfs.log"
         )
         proxy_note.setWordWrap(True)
         proxy_note.setStyleSheet(
@@ -528,27 +528,27 @@ class ServerTab(QWidget):
         return card
 
     def _swfs_url_text(self) -> str:
-        """Build the S3 / Filer URL display string from the live SeaweedFS config."""
+        """Build the S3 / Console URL display string from the live RustFS config."""
         try:
-            s3_port    = self._seaweedfs.s3_port
-            filer_port = self._seaweedfs.filer_port
-            https_port = self._seaweedfs.https_port
+            api_port     = self._rustfs.api_port
+            console_port = self._rustfs.console_port
+            https_port   = self._rustfs.https_port
             if https_port == 443:
                 return (
                     f"https://s3.pgops.local  "
-                    f"·  Filer: https://filer.pgops.local  "
-                    f"·  Internal: 127.0.0.1:{s3_port}"
+                    f"·  Console: https://console.pgops.local  "
+                    f"·  Internal: 127.0.0.1:{api_port}"
                 )
             return (
                 f"https://s3.pgops.local:{https_port}  "
-                f"·  Filer: https://filer.pgops.local:{https_port}  "
-                f"·  Internal: 127.0.0.1:{s3_port}"
+                f"·  Console: https://console.pgops.local:{https_port}  "
+                f"·  Internal: 127.0.0.1:{api_port}"
             )
         except Exception:
-            return "127.0.0.1:8333 (S3)  ·  127.0.0.1:8888 (Filer)"
+            return "127.0.0.1:9000 (S3)  ·  127.0.0.1:9001 (Console)"
 
-    def update_seaweedfs_status(self, running: bool, available: bool):
-        """Called from the main_window poll loop to keep the card in sync."""
+    def update_rustfs_status(self, running: bool, available: bool):
+        """Called from the main_window poll loop to keep the RustFS card in sync."""
         self._swfs_s3_url.setText(self._swfs_url_text())
 
         if not available:
@@ -795,7 +795,7 @@ class ServerTab(QWidget):
             f"pgops.local{suffix}  ·  "
             f"pgadmin.pgops.local{suffix}  ·  "
             f"s3.pgops.local{suffix}  ·  "
-            f"filer.pgops.local{suffix}"
+            f"console.pgops.local{suffix}"
         )
 
     # ── FrankenPHP card ───────────────────────────────────────────────────────
@@ -1046,7 +1046,7 @@ class ServerTab(QWidget):
         ("postgres",   "PostgreSQL"),
         ("landing",    "Landing Server"),
         ("api",        "Internal API"),
-        ("seaweedfs",  "SeaweedFS"),
+        ("rustfs",     "RustFS"),
         ("pgadmin",    "pgAdmin 4"),
         ("caddy",      "Caddy"),
         ("apps",       "App Processes"),

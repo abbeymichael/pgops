@@ -27,7 +27,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt6.QtGui import QColor, QIcon, QPixmap, QAction
 
-from core import seaweedfs_manager
+from core import rustfs_manager
 from core.pg_manager import PostgresManager, BASE_DIR, DATA_DIR, LOG_FILE, _bin
 from core.config import load_config, save_config
 from core.pg_manager import get_app_data_dir
@@ -35,7 +35,7 @@ from core.mdns import MDNSBroadcaster, verify_mdns_resolution
 from core.scheduler import BackupScheduler
 from core.service_manager import service_exists
 import core.db_manager as dbm
-from core.seaweedfs_manager import SeaweedFSManager
+from core.rustfs_manager import RustFSManager
 from core.pgadmin_manager import PgAdminManager
 
 # Phase 2
@@ -142,7 +142,7 @@ class MainWindow(QMainWindow):
         )
         # Legacy mdns broadcaster (pgops.local via _postgresql._tcp)
         self.mdns = MDNSBroadcaster(port=self.config["port"], log_fn=self._log)
-        self.minio = SeaweedFSManager(self.config, log_fn=self._log)
+        self.minio = RustFSManager(self.config, log_fn=self._log)
         self.pgadmin = PgAdminManager(self.config, log_fn=self._log)
 
         # Phase 2 — mDNS server for .local LAN discovery
@@ -160,7 +160,7 @@ class MainWindow(QMainWindow):
         self.api_server = APIServer(
             app_registry_fn=load_apps,
             process_manager=self.app_procs,
-            seaweedfs_manager=self.minio,
+            rustfs_manager=self.minio,
             postgres_manager=self.manager,
             caddy_manager=self.caddy,
             admin_config=self.config,
@@ -174,7 +174,7 @@ class MainWindow(QMainWindow):
         self._orch_starters = {
             "landing":    lambda: self.landing_srv.start(),
             "api":        lambda: self.api_server.start(),
-            "seaweedfs":  lambda: self.minio.start() if self.minio.is_binaries_available() else (True, "SeaweedFS binary not installed — skipped."),
+            "rustfs":     lambda: self.minio.start() if self.minio.is_binaries_available() else (True, "RustFS binary not installed — skipped."),
             "pgadmin":    lambda: self.pgadmin.start(caddy_https_port=self.caddy.https_port) if self.pgadmin.is_available() else (True, "pgAdmin not available — skipped."),
             "caddy":      self._orch_start_caddy,
             "apps":       self._orch_start_apps,
@@ -186,7 +186,7 @@ class MainWindow(QMainWindow):
             "apps":       lambda: (self.app_procs.stop_all(), "Apps stopped.")[1] or (True, "Apps stopped."),
             "caddy":      lambda: self.caddy.stop(),
             "pgadmin":    lambda: self.pgadmin.stop(),
-            "seaweedfs":  lambda: self.minio.stop(),
+            "rustfs":     lambda: self.minio.stop(),
             "api":        lambda: self.api_server.stop(),
             "landing":    lambda: self.landing_srv.stop(),
         }
@@ -223,7 +223,7 @@ class MainWindow(QMainWindow):
         # mDNS broadcasters start immediately (no port conflicts possible).
         QTimer.singleShot(300, self._auto_start_mdns)
         QTimer.singleShot(400, self._start_mdns_server)
-        # Orchestrator handles landing, api, seaweedfs, caddy, apps in order.
+        # Orchestrator handles landing, api, rustfs, caddy, apps in order.
         QTimer.singleShot(600, self._orchestrate_infrastructure)
 
     # ── Orchestrator starters (called by ServiceOrchestrator) ────────────────
@@ -351,7 +351,7 @@ class MainWindow(QMainWindow):
         self._srv_tab = ServerTab(
             manager=self.manager,
             config=self.config,
-            seaweedfs=self.minio,
+            seaweedfs=self.minio,  # back-compat; ServerTab alias to rustfs
             pgadmin=self.pgadmin,
             on_start=self._start,
             on_stop=self._stop,
@@ -590,7 +590,7 @@ class MainWindow(QMainWindow):
             # We start each via the orchestrator so pre-flight runs first.
             def _start_dependents(_p):
                 results = []
-                for sid in ("seaweedfs", "pgadmin", "caddy", "apps"):
+                for sid in ("rustfs", "pgadmin", "caddy", "apps"):
                     st = self.orchestrator.get_state(sid)
                     if st and st.state.name in ("HEALTHY",):
                         continue  # already up
@@ -638,9 +638,14 @@ class MainWindow(QMainWindow):
         else:
             self._log(f"Setup failed: {msg}")
 
-    # ── SeaweedFS ─────────────────────────────────────────────────────────────
+    # ── RustFS ────────────────────────────────────────────────────────────────
 
-    def _setup_seaweedfs(self):
+    # Back-compat shims so any external callers using the old names still work
+    def _setup_seaweedfs(self): self._setup_rustfs()
+    def _start_seaweedfs(self): self._start_rustfs()
+    def _stop_seaweedfs(self):  self._stop_rustfs()
+
+    def _setup_rustfs(self):
         self._srv_tab.btn_swfs_setup.setEnabled(False)
         self._srv_tab.set_swfs_progress(True, 0)
 
@@ -650,45 +655,44 @@ class MainWindow(QMainWindow):
         def done(ok, msg):
             self._srv_tab.set_swfs_progress(False)
             self._srv_tab.btn_swfs_setup.setEnabled(True)
-            self._log(f"[SeaweedFS] {msg}")
+            self._log(f"[RustFS] {msg}")
             self._poll()
 
         w = self._run(fn, done)
         w.progress.connect(lambda v: self._srv_tab.set_swfs_progress(True, v))
 
-    def _start_seaweedfs(self):
+    def _start_rustfs(self):
         if not self.minio.is_binaries_available():
             QMessageBox.information(
                 self, "Setup Required",
-                "Click \"Setup\" in the SeaweedFS card first to download the binary.",
+                "Click \"Setup\" in the RustFS card first to download the binary.",
             )
             return
         self._srv_tab.btn_swfs_start.setEnabled(False)
 
         def fn(_p):
-            # Use the orchestrator so pre-flight runs (port check + stale sockets)
-            ok, msg = self.orchestrator.start_service("seaweedfs")
+            # Use the orchestrator so pre-flight runs (port check)
+            ok, msg = self.orchestrator.start_service("rustfs")
             return ok, msg
 
         def done(ok, msg):
             self._srv_tab.btn_swfs_start.setEnabled(True)
-            self._log(f"[SeaweedFS] {msg}")
+            self._log(f"[RustFS] {msg}")
             if not ok:
                 QMessageBox.critical(
-                    self, "SeaweedFS Failed to Start",
+                    self, "RustFS Failed to Start",
                     f"{msg}\n\n"
                     "Common causes:\n"
-                    "• A previous SeaweedFS process is still running (port 8333/8888/9333 busy).\n"
-                    "  → Open Task Manager and end 'weed.exe', then try again.\n"
-                    "• Stale socket files from a crash.\n"
-                    "  → PGOps will clean these automatically on the next attempt.\n\n"
-                    f"Log file: <AppData>\\seaweedfs.log",
+                    "• A previous RustFS process is still running (port 9000/9001 busy).\n"
+                    "  → Open Task Manager and end 'rustfs.exe', then try again.\n"
+                    "• Insufficient disk space in the data directory.\n\n"
+                    f"Log file: <AppData>\\rustfs.log",
                 )
             self._poll()
 
         self._run(fn, done)
 
-    def _stop_seaweedfs(self):
+    def _stop_rustfs(self):
         self._srv_tab.btn_swfs_stop.setEnabled(False)
 
         def fn(_p):
@@ -696,7 +700,7 @@ class MainWindow(QMainWindow):
 
         def done(ok, msg):
             self._srv_tab.btn_swfs_stop.setEnabled(True)
-            self._log(f"[SeaweedFS] {msg}")
+            self._log(f"[RustFS] {msg}")
             self._poll()
 
         self._run(fn, done)
@@ -1117,7 +1121,7 @@ class MainWindow(QMainWindow):
 
         self._update_pgadmin_status()
 
-        self._srv_tab.update_seaweedfs_status(
+        self._srv_tab.update_rustfs_status(
             running=self.minio.is_running(),
             available=self.minio.is_binaries_available(),
         )

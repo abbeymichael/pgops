@@ -39,13 +39,11 @@ DEFAULT_CONFIG = {
     # Internal landing-page server (Caddy proxies pgops.local → here)
     "landing_port": 8080,
 
-    # SeaweedFS ports (direct binary, Caddy proxies subdomains to these)
-    # S3 API port  — replaces former minio_api_port     (was 9000)
-    # Filer port   — replaces former minio_console_port  (was 9001)
-    # Master port  — internal only, never proxied by Caddy
-    "seaweedfs_s3_port":     8333,
-    "seaweedfs_filer_port":  8888,
-    "seaweedfs_master_port": 9333,
+    # RustFS ports (single binary, Caddy proxies subdomains to these)
+    # S3 API port     — RustFS S3-compatible API endpoint  (default 9000)
+    # Console port    — RustFS web management console      (default 9001)
+    "rustfs_api_port":     9000,
+    "rustfs_console_port": 9001,
 
     # pgAdmin port (when running)
     "pgadmin_port": 5050,

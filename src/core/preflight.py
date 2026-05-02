@@ -12,7 +12,7 @@ Responsibilities
    crash with "bind: address already in use".
 
 2. STALE SOCKET CLEANUP
-   SeaweedFS (and any future gRPC service) leaves behind Unix socket files
+   RustFS (and any future gRPC service) leaves behind Unix socket files
    when it crashes on Windows/Linux.  The next start attempt fails with
    "A socket operation encountered a dead network."  We delete those files
    before starting the service.
@@ -66,10 +66,10 @@ class PortConflict:
             )
 
     def fix_hint(self) -> str:
-        if self.owner_name and "weed" in self.owner_name.lower():
+        if self.owner_name and "rustfs" in self.owner_name.lower():
             return (
-                "A previous SeaweedFS process is still running. "
-                "Open Task Manager, find 'weed.exe', and end it — "
+                "A previous RustFS process is still running. "
+                "Open Task Manager, find 'rustfs.exe', and end it — "
                 "or restart PGOps and use the Stop button before starting again."
             )
         if self.owner_name and "postgres" in self.owner_name.lower():

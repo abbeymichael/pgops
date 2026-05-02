@@ -319,7 +319,7 @@ def _rollback_database(db_name: str, db_user: str, admin_config: dict):
 
 
 def _rollback_bucket(bucket_name: str):
-    """Drop the SeaweedFS bucket."""
+    """Drop the RustFS bucket."""
     try:
         from core.bucket_manager import drop_bucket
 
@@ -360,7 +360,7 @@ def provision_app(
     Full provisioning pipeline for a new app.
 
     For Laravel apps (stack_type="laravel") the full pipeline runs:
-      files → PHP ini → database → SeaweedFS bucket → .env → key:generate → migrate.
+      files → PHP ini → database → RustFS bucket → .env → key:generate → migrate.
 
     For non-Laravel stacks (stack_type="static", "other") only files are
     extracted/cloned; no database, bucket, or PHP ini is created.
@@ -478,7 +478,7 @@ def provision_app(
         else:
             _step(f"Creating database '{db_name}'", "done")
 
-        # ── 4. SeaweedFS bucket ──────────────────────────────────────────────────
+        # ── 4. RustFS bucket ──────────────────────────────────────────────────────
         _step(f"Creating bucket '{bucket_name}'")
         try:
             from core.bucket_manager import create_bucket

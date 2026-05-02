@@ -137,25 +137,14 @@ def build_registry(config: dict) -> dict[str, ServiceSpec]:
     are always read from the live config, never from hard-coded constants.
     """
 
-    pg_port      = int(config.get("port",                  5432))
-    landing_port = int(config.get("landing_port",          8080))
+    pg_port      = int(config.get("port",                5432))
+    landing_port = int(config.get("landing_port",        8080))
     api_port     = 7420   # internal API — not user-configurable
-    s3_port      = int(config.get("seaweedfs_s3_port",     8333))
-    filer_port   = int(config.get("seaweedfs_filer_port",  8888))
-    master_port  = int(config.get("seaweedfs_master_port", 9333))
-    pgadmin_port = int(config.get("pgadmin_port",          5050))
-    caddy_http   = int(config.get("caddy_http_port",       80))
-    caddy_https  = int(config.get("caddy_https_port",      443))
-
-    # SeaweedFS internal gRPC port for the master (master_port + 10000)
-    master_grpc  = master_port + 10000   # e.g. 19333
-
-    # Stale Unix sockets SeaweedFS leaves behind on Windows/Linux crashes
-    tmp = Path("/tmp")
-    swfs_sockets = [
-        tmp / f"seaweedfs-master-grpc-{master_grpc}.sock",
-        tmp / f"seaweedfs-master-{master_port}.sock",
-    ]
+    rustfs_port  = int(config.get("rustfs_api_port",     9000))
+    console_port = int(config.get("rustfs_console_port", 9001))
+    pgadmin_port = int(config.get("pgadmin_port",        5050))
+    caddy_http   = int(config.get("caddy_http_port",     80))
+    caddy_https  = int(config.get("caddy_https_port",    443))
 
     registry: dict[str, ServiceSpec] = {}
 
@@ -195,20 +184,20 @@ def build_registry(config: dict) -> dict[str, ServiceSpec]:
         description     = f"CLI bridge  ·  127.0.0.1:{api_port}",
     )
 
-    # ── 4. SeaweedFS (master + volume + filer + S3 in one process) ───────────
-    registry["seaweedfs"] = ServiceSpec(
-        name            = "SeaweedFS",
-        service_id      = "seaweedfs",
-        ports           = [s3_port, filer_port, master_port],
+    # ── 4. RustFS (single-binary S3-compatible object storage) ─────────────
+    registry["rustfs"] = ServiceSpec(
+        name            = "RustFS",
+        service_id      = "rustfs",
+        ports           = [rustfs_port, console_port],
         depends_on      = [],          # independent of postgres
-        health_probe    = lambda: _tcp_probe("127.0.0.1", s3_port),
-        startup_timeout = 40.0,
-        poll_interval   = 1.0,
+        health_probe    = lambda: _tcp_probe("127.0.0.1", rustfs_port),
+        startup_timeout = 30.0,
+        poll_interval   = 0.5,
         optional        = True,
-        stale_sockets   = swfs_sockets,
+        stale_sockets   = [],
         description     = (
-            f"Object storage  ·  S3:{s3_port}  "
-            f"Filer:{filer_port}  Master:{master_port}"
+            f"Object storage (S3-compatible)  ·  "
+            f"API:{rustfs_port}  Console:{console_port}"
         ),
     )
 
@@ -225,12 +214,12 @@ def build_registry(config: dict) -> dict[str, ServiceSpec]:
         description     = f"Database UI  ·  port {pgadmin_port}",
     )
 
-    # ── 6. Caddy (depends on landing, seaweedfs, pgadmin being ready) ─────────
+    # ── 6. Caddy (depends on landing, rustfs, pgadmin being ready) ───────────
     registry["caddy"] = ServiceSpec(
         name            = "Caddy",
         service_id      = "caddy",
         ports           = [caddy_http, caddy_https],
-        depends_on      = ["landing", "seaweedfs"],   # pgadmin optional
+        depends_on      = ["landing", "rustfs"],      # pgadmin optional
         health_probe    = lambda: _tcp_probe("127.0.0.1", caddy_https),
         startup_timeout = 15.0,
         optional        = True,
