@@ -319,7 +319,7 @@ def _rollback_database(db_name: str, db_user: str, admin_config: dict):
 
 
 def _rollback_bucket(bucket_name: str):
-    """Drop the MinIO bucket."""
+    """Drop the RustFS bucket."""
     try:
         from core.bucket_manager import drop_bucket
 
@@ -360,7 +360,7 @@ def provision_app(
     Full provisioning pipeline for a new app.
 
     For Laravel apps (stack_type="laravel") the full pipeline runs:
-      files → PHP ini → database → MinIO bucket → .env → key:generate → migrate.
+      files → PHP ini → database → RustFS bucket → .env → key:generate → migrate.
 
     For non-Laravel stacks (stack_type="static", "other") only files are
     extracted/cloned; no database, bucket, or PHP ini is created.
@@ -478,7 +478,7 @@ def provision_app(
         else:
             _step(f"Creating database '{db_name}'", "done")
 
-        # ── 4. MinIO bucket ───────────────────────────────────────────────────
+        # ── 4. RustFS bucket ──────────────────────────────────────────────────────
         _step(f"Creating bucket '{bucket_name}'")
         try:
             from core.bucket_manager import create_bucket
@@ -518,7 +518,7 @@ def provision_app(
                     "AWS_SECRET_ACCESS_KEY": secret_key,
                     "AWS_DEFAULT_REGION": "us-east-1",
                     "AWS_BUCKET": bucket_name,
-                    "AWS_ENDPOINT": "https://pgops.local:9000",
+                    "AWS_ENDPOINT": "https://s3.pgops.local",
                     "AWS_USE_PATH_STYLE_ENDPOINT": "true",
                 },
             )

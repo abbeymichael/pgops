@@ -39,9 +39,11 @@ DEFAULT_CONFIG = {
     # Internal landing-page server (Caddy proxies pgops.local → here)
     "landing_port": 8080,
 
-    # MinIO ports (direct binary, Caddy proxies subdomains to these)
-    "minio_api_port":     9000,
-    "minio_console_port": 9001,
+    # RustFS ports (single binary, Caddy proxies subdomains to these)
+    # S3 API port     — RustFS S3-compatible API endpoint  (default 9000)
+    # Console port    — RustFS web management console      (default 9001)
+    "rustfs_api_port":     9000,
+    "rustfs_console_port": 9001,
 
     # pgAdmin port (when running)
     "pgadmin_port": 5050,

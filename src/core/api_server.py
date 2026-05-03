@@ -120,7 +120,7 @@ class APIServer:
         app_registry_fn: Callable,      # fn() -> list[dict]
         process_manager,                 # AppProcessManager
         postgres_manager,                # PostgresManager
-        minio_manager,                   # MinIOManager
+        rustfs_manager,                  # RustFSManager
         caddy_manager,                   # CaddyManager
         admin_config: dict,
         log_fn=None,
@@ -128,7 +128,7 @@ class APIServer:
         self._apps_fn    = app_registry_fn
         self._procs      = process_manager
         self._pg         = postgres_manager
-        self._minio      = minio_manager
+        self._rustfs     = rustfs_manager
         self._caddy      = caddy_manager
         self._cfg        = admin_config
         self._log        = log_fn or print
@@ -161,11 +161,11 @@ class APIServer:
 
     def _status(self, **_):
         return {
-            "pgops":    "running",
-            "postgres": self._pg.is_running(),
-            "minio":    self._minio.is_running(),
-            "caddy":    self._caddy.is_running(),
-            "apps":     len(self._apps_fn()),
+            "pgops":      "running",
+            "postgres":   self._pg.is_running(),
+            "rustfs":     self._rustfs.is_running(),
+            "caddy":      self._caddy.is_running(),
+            "apps":       len(self._apps_fn()),
         }
 
     def _list_apps(self, **_):
