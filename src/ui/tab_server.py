@@ -25,7 +25,7 @@ def _card(parent=None):
 class ServerTab(QWidget):
     def __init__(
         self,
-        manager, config, minio, pgadmin,
+        manager, config, rustfs, pgadmin,
         on_start, on_stop, on_download,
         on_start_pgadmin, on_stop_pgadmin, on_open_pgadmin, on_reset_pgadmin,
         # Phase 2 callbacks
@@ -37,7 +37,7 @@ class ServerTab(QWidget):
         super().__init__(parent)
         self._manager    = manager
         self._config     = config
-        self._minio      = minio
+        self._rustfs     = rustfs
         self._pgadmin    = pgadmin
         self._caddy      = caddy_manager
         self._frankenphp = frankenphp_manager
@@ -627,8 +627,8 @@ class ServerTab(QWidget):
         return (
             f"pgops.local{suffix}  ·  "
             f"pgadmin.pgops.local{suffix}  ·  "
-            f"minio.pgops.local{suffix}  ·  "
-            f"console.pgops.local{suffix}"
+            f"storage.pgops.local{suffix}  ·  "
+            f"storage-console.pgops.local{suffix}"
         )
 
     # ── FrankenPHP card ───────────────────────────────────────────────────────

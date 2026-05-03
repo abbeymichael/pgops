@@ -1,11 +1,11 @@
 """
 files_tab.py
-UI for MinIO file storage management.
+UI for RustFS file storage management.
 Mirrors the databases tab — each bucket has its own access key and secret.
 
 URL policy:
   All URLs shown to the user and written into .env blocks use the mkcert-secured
-  Caddy subdomains (https://minio.pgops.local / https://console.pgops.local).
+  Caddy subdomains (https://storage.pgops.local / https://storage-console.pgops.local).
   The raw internal http://127.0.0.1:9000 is never surfaced in the UI.
 """
 
@@ -457,9 +457,9 @@ class FolderDialog(QDialog):
     Allows creating and deleting folders.
     """
 
-    def __init__(self, minio_manager, bucket: str, parent=None):
+    def __init__(self, rustfs_manager, bucket: str, parent=None):
         super().__init__(parent)
-        self.minio  = minio_manager
+        self.rustfs = rustfs_manager
         self.bucket = bucket
         self.setWindowTitle(f"Folders — {bucket}")
         self.setFixedSize(460, 500)
@@ -522,7 +522,7 @@ class FolderDialog(QDialog):
 
     def _load_folders(self):
         self.folder_list.clear()
-        folders = self.minio.list_folders(self.bucket)
+        folders = self.rustfs.list_folders(self.bucket)
         if not folders:
             item = QListWidgetItem("(no folders — bucket is flat)")
             item.setForeground(QColor(C_TEXT3))
@@ -546,7 +546,7 @@ class FolderDialog(QDialog):
             QMessageBox.warning(self, "Invalid Name",
                 "Folder name cannot contain slashes. Use the name only.")
             return
-        success, msg = self.minio.create_folder(self.bucket, name)
+        success, msg = self.rustfs.create_folder(self.bucket, name)
         if success:
             self._load_folders()
         else:
@@ -567,7 +567,7 @@ class FolderDialog(QDialog):
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
-        success, msg = self.minio.delete_folder(self.bucket, folder)
+        success, msg = self.rustfs.delete_folder(self.bucket, folder)
         if success:
             self._load_folders()
         else:
@@ -577,13 +577,14 @@ class FolderDialog(QDialog):
 # ─── Files Tab Widget ─────────────────────────────────────────────────────────
 class FilesTab(QWidget):
     """
-    Full MinIO management tab.
-    Instantiate with: FilesTab(minio_manager)
+    Full RustFS object storage management tab.
+    Instantiate with: FilesTab(rustfs_manager)
     """
 
-    def __init__(self, minio_manager, parent=None):
+
+    def __init__(self, rustfs_manager, parent=None):
         super().__init__(parent)
-        self.minio    = minio_manager
+        self.minio    = rustfs_manager
         self._workers = []
         self._last_creds = {}
         self._build_ui()
@@ -611,7 +612,7 @@ class FilesTab(QWidget):
         page_title.setStyleSheet(
             f"color:{C_TEXT};font-size:24px;font-weight:800;background:transparent;"
         )
-        badge = QLabel("MINIO")
+        badge = QLabel("RUSTFS")
         badge.setStyleSheet(
             f"color:{C_TEXT3};background:{C_SURFACE};border:1px solid {C_BORDER2};"
             f"border-radius:4px;font-size:9px;font-weight:800;"
@@ -689,7 +690,7 @@ class FilesTab(QWidget):
         ep_col.addWidget(self.endpoint_lbl)
         sc.addLayout(ep_col, 1)
 
-        self.btn_setup = _make_hdr_btn("⚙  Setup MinIO", "#78350f", "#92400e", "#fef3c7")
+        self.btn_setup = _make_hdr_btn("⚙  Setup RustFS", "#78350f", "#92400e", "#fef3c7")
         self.btn_setup.clicked.connect(self._setup)
         self.btn_console = _make_hdr_btn("Open Web Console →", C_SURFACE2, C_BORDER2, C_TEXT2)
         self.btn_console.clicked.connect(self._open_console)
@@ -775,7 +776,7 @@ class FilesTab(QWidget):
             "Each bucket has its own access key and secret. "
             "Private buckets require credentials — public buckets allow anonymous downloads. "
             "Your Laravel app connects via FILESYSTEM_DISK=s3 with AWS_ENDPOINT pointing to "
-            "https://minio.pgops.local (mkcert-secured, no certificate warnings). "
+            "https://storage.pgops.local (mkcert-secured, no certificate warnings). "
             "Use 📁 Folders to create key-prefix folders inside a bucket."
         )
         info.setWordWrap(True)
@@ -797,10 +798,10 @@ class FilesTab(QWidget):
     def _start(self):
         if not self.minio.is_binaries_available():
             QMessageBox.information(self, "Setup Required",
-                "Click 'Setup MinIO' first to get the MinIO binaries.")
+                "Click 'Setup RustFS' first to get the RustFS binaries.")
             return
         self.btn_start.setEnabled(False)
-        self._log_status("Starting MinIO...")
+        self._log_status("Starting RustFS...")
 
         def fn(_prog):
             return self.minio.start()
@@ -846,7 +847,7 @@ class FilesTab(QWidget):
         w.progress.connect(self.prog.setValue)
 
     def _open_console(self):
-        """Open the MinIO web console via the mkcert-secured Caddy URL."""
+        """Open the RustFS web console via the mkcert-secured Caddy URL."""
         import webbrowser
         webbrowser.open(self.minio.console_url())
 
@@ -891,7 +892,7 @@ class FilesTab(QWidget):
         """Create bucket with public/private policy, then show credentials."""
         if not self.minio.is_running():
             QMessageBox.warning(self, "Storage Not Running",
-                "Start the MinIO storage server first.")
+                "Start the RustFS storage server first.")
             return
 
         dlg = CreateBucketDialog(self)
@@ -1093,7 +1094,7 @@ class FilesTab(QWidget):
         name = self.bucket_table.item(row, 0).text()
         if not self.minio.is_running():
             QMessageBox.warning(self, "Storage Not Running",
-                "Start the MinIO storage server first.")
+                "Start the RustFS storage server first.")
             return
         dlg = FolderDialog(self.minio, name, self)
         dlg.exec()

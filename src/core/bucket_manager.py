@@ -1,8 +1,8 @@
 """
 bucket_manager.py
-Manages MinIO buckets, users, and access policies.
+Manages RustFS buckets, users, and access policies.
 Mirrors db_manager.py — each bucket gets its own access key + secret.
-Uses the mc (MinIO Client) CLI for all operations.
+Uses the mc (S3-compatible Client) CLI for all operations.
 """
 
 import subprocess
@@ -26,7 +26,7 @@ ALIAS = "pgops"
 
 def _mc(args: list, capture=True) -> tuple[bool, str]:
     """Run an mc command against the pgops alias."""
-    from core.minio_manager import mc_bin
+    from core.rustfs_manager import mc_bin
     cmd = [str(mc_bin())] + args
     try:
         r = subprocess.run(
@@ -101,7 +101,7 @@ def get_bucket_size(bucket_name: str) -> str:
 
 
 def list_users() -> list[dict]:
-    """List all MinIO service accounts / users."""
+    """List all RustFS service accounts / users."""
     ok, out = _mc(["admin", "user", "list", "--json", ALIAS])
     if not ok:
         return []

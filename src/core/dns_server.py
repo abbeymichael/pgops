@@ -46,8 +46,8 @@ def get_hosts_entries(host_ip: str, app_domains: list = None) -> str:
         "pgops.local",
         "www.pgops.local",
         "pgadmin.pgops.local",
-        "minio.pgops.local",
-        "console.pgops.local",
+        "storage.pgops.local",
+        "storage-console.pgops.local",
     ]
     extra = app_domains or []
     all_domains = base_domains + [d for d in extra if d not in base_domains]

@@ -6,18 +6,18 @@ Architecture (post-mkcert migration):
   - Caddy uses `tls <cert> <key>` pointing to mkcert-issued certificate
   - mkcert CA is trusted system-wide → zero browser warnings on LAN
   - Every service gets its own subdomain under pgops.local:
-      pgops.local              → landing page  (port 8080)
-      minio.pgops.local        → MinIO API     (port 9000)
-      console.pgops.local      → MinIO Console (port 9001)
-      pgadmin.pgops.local      → pgAdmin       (port 5050)
-      <app>.pgops.local        → Laravel apps  (port 8081+)
+      pgops.local                     → landing page    (port 8080)
+      storage.pgops.local             → RustFS API      (port 9000)
+      storage-console.pgops.local     → RustFS Console  (port 9001)
+      pgadmin.pgops.local             → pgAdmin         (port 5050)
+      <app>.pgops.local               → Laravel apps    (port 8081+)
   - HTTP is redirected to HTTPS automatically
   - Caddy admin API on 127.0.0.1:2019 for zero-downtime reloads
   - Caddy is NOT assumed to be running as admin; ports ≥1024 are used
     by default so no elevated privileges are needed
 
-NOTE: minio.pgops.local, console.pgops.local, and pgadmin.pgops.local are
-ALWAYS included in the Caddyfile regardless of whether those services are
+NOTE: storage.pgops.local, storage-console.pgops.local, and pgadmin.pgops.local
+are ALWAYS included in the Caddyfile regardless of whether those services are
 currently running. Caddy will return a 502 if the upstream isn't up, which
 is the correct behaviour — the domain still resolves and the user gets a
 clear error rather than a DNS failure.
@@ -210,8 +210,8 @@ def generate_caddyfile(
     https_port:   int = 8443,
     landing_port: int = 8081,
     admin_port:   int = 2019,
-    minio_api_port:     int = 9000,
-    minio_console_port: int = 9001,
+    rustfs_api_port:     int = 9000,
+    rustfs_console_port: int = 9001,
     pgadmin_port:       int = 5050,
     pgadmin_enabled:    bool = True,   # always True now — Caddy routes it regardless
     cert_file: str = "",
@@ -221,12 +221,12 @@ def generate_caddyfile(
     Generate a Caddyfile that:
       1. Redirects all HTTP → HTTPS (port-aware for non-standard ports)
       2. Uses the mkcert cert+key when available, or `tls internal` as fallback
-      3. Routes every known service subdomain (minio, console, pgadmin ALWAYS)
+      3. Routes every known service subdomain (storage, storage-console, pgadmin ALWAYS)
       4. Routes every deployed app subdomain
 
-    minio.pgops.local, console.pgops.local and pgadmin.pgops.local are always
-    written — if the upstream service isn't running Caddy returns 502 which is
-    the correct, user-friendly behaviour (vs DNS failure).
+    storage.pgops.local, storage-console.pgops.local and pgadmin.pgops.local are
+    always written — if the upstream service isn't running Caddy returns 502 which
+    is the correct, user-friendly behaviour (vs DNS failure).
 
     NOTE: http_port is intentionally NOT set in the global block. Setting it
     globally causes Caddy to bind that port system-wide, which conflicts with
@@ -332,15 +332,15 @@ def generate_caddyfile(
         "",
     ]
 
-    # ── minio.pgops.local → MinIO S3 API ─────────────────────────────────────
-    lines += subdomain_block("minio.pgops.local", minio_api_port)
+    # ── storage.pgops.local → RustFS S3 API ────────────────────────────────────
+    lines += subdomain_block("storage.pgops.local", rustfs_api_port)
 
-    # ── console.pgops.local → MinIO Web Console ───────────────────────────────
-    # MinIO console needs WebSocket support for live updates.
+    # ── storage-console.pgops.local → RustFS Web Console ────────────────────────
+    # RustFS console needs WebSocket support for live updates.
     # header_up directives are nested inside reverse_proxy (required by Caddy).
     lines += subdomain_block(
-        "console.pgops.local",
-        minio_console_port,
+        "storage-console.pgops.local",
+        rustfs_console_port,
         extra_directives=[
             "header_up Host {host}",
             "header_up X-Real-IP {remote_host}",
@@ -431,12 +431,12 @@ class CaddyManager:
         return self.config.get("landing_port", 8081)
 
     @property
-    def minio_api_port(self) -> int:
-        return self.config.get("minio_api_port", 9000)
+    def rustfs_api_port(self) -> int:
+        return self.config.get("rustfs_api_port", 9000)
 
     @property
-    def minio_console_port(self) -> int:
-        return self.config.get("minio_console_port", 9001)
+    def rustfs_console_port(self) -> int:
+        return self.config.get("rustfs_console_port", 9001)
 
     @property
     def pgadmin_port(self) -> int:
@@ -545,8 +545,8 @@ class CaddyManager:
             https_port=self.https_port,
             landing_port=self.landing_port,
             admin_port=self.ADMIN_PORT,
-            minio_api_port=self.minio_api_port,
-            minio_console_port=self.minio_console_port,
+            rustfs_api_port=self.rustfs_api_port,
+            rustfs_console_port=self.rustfs_console_port,
             pgadmin_port=self.pgadmin_port,
             pgadmin_enabled=True,   # always include pgadmin block
             cert_file=cert_file,
@@ -554,7 +554,7 @@ class CaddyManager:
         )
         self._log(f"[Caddy] Caddyfile → {caddyfile}")
         self._log(f"[Caddy] TLS mode: {'mkcert' if cert_file else 'internal CA'}")
-        self._log(f"[Caddy] Subdomains: pgops.local | minio.pgops.local | console.pgops.local | pgadmin.pgops.local")
+        self._log(f"[Caddy] Subdomains: pgops.local | storage.pgops.local | storage-console.pgops.local | pgadmin.pgops.local")
         self._log(f"[Caddy] Log → {self._get_log_path()}")
 
         env = _build_caddy_env()
@@ -595,14 +595,14 @@ class CaddyManager:
                     f"[Caddy] Ready — HTTP:{self.http_port} HTTPS:{self.https_port} TLS:{tls_mode}\n"
                     f"[Caddy] Access your services at:\n"
                     f"[Caddy]   https://pgops.local:{self.https_port}\n"
-                    f"[Caddy]   https://minio.pgops.local:{self.https_port}\n"
-                    f"[Caddy]   https://console.pgops.local:{self.https_port}\n"
+                    f"[Caddy]   https://storage.pgops.local:{self.https_port}\n"
+                    f"[Caddy]   https://storage-console.pgops.local:{self.https_port}\n"
                     f"[Caddy]   https://pgadmin.pgops.local:{self.https_port}"
                     + (f"\n[Caddy]   +{app_count} app subdomain(s)" if app_count else "")
                 )
                 return True, (
                     f"Caddy started ({tls_mode}). "
-                    f"pgadmin.pgops.local | minio.pgops.local | console.pgops.local"
+                    f"pgadmin.pgops.local | storage.pgops.local | storage-console.pgops.local"
                 )
 
         tail = self._read_log_tail()
@@ -627,8 +627,8 @@ class CaddyManager:
                 https_port=self.https_port,
                 landing_port=self.landing_port,
                 admin_port=self.ADMIN_PORT,
-                minio_api_port=self.minio_api_port,
-                minio_console_port=self.minio_console_port,
+                rustfs_api_port=self.rustfs_api_port,
+                rustfs_console_port=self.rustfs_console_port,
                 pgadmin_port=self.pgadmin_port,
                 pgadmin_enabled=True,   # always include pgadmin block
                 cert_file=cert_file,
@@ -730,8 +730,8 @@ class CaddyManager:
             https_port=self.https_port,
             landing_port=self.landing_port,
             admin_port=self.ADMIN_PORT,
-            minio_api_port=self.minio_api_port,
-            minio_console_port=self.minio_console_port,
+            rustfs_api_port=self.rustfs_api_port,
+            rustfs_console_port=self.rustfs_console_port,
             pgadmin_port=self.pgadmin_port,
             pgadmin_enabled=True,
             cert_file=cert_file,
@@ -771,15 +771,15 @@ class CaddyManager:
             return "https://pgadmin.pgops.local"
         return f"https://pgadmin.pgops.local:{self.https_port}"
 
-    def minio_url(self) -> str:
+    def rustfs_url(self) -> str:
         if self.https_port == 443:
-            return "https://minio.pgops.local"
-        return f"https://minio.pgops.local:{self.https_port}"
+            return "https://storage.pgops.local"
+        return f"https://storage.pgops.local:{self.https_port}"
 
-    def minio_console_url(self) -> str:
+    def rustfs_console_url(self) -> str:
         if self.https_port == 443:
-            return "https://console.pgops.local"
-        return f"https://console.pgops.local:{self.https_port}"
+            return "https://storage-console.pgops.local"
+        return f"https://storage-console.pgops.local:{self.https_port}"
 
     # ── Legacy compat ─────────────────────────────────────────────────────────
 

@@ -34,7 +34,7 @@ from core.mdns import MDNSBroadcaster, verify_mdns_resolution
 from core.scheduler import BackupScheduler
 from core.service_manager import service_exists
 import core.db_manager as dbm
-from core.minio_manager import MinIOManager
+from core.rustfs_manager import RustFSManager
 from core.pgadmin_manager import PgAdminManager
 
 # Phase 2
@@ -137,7 +137,7 @@ class MainWindow(QMainWindow):
         )
         # Legacy mdns broadcaster (pgops.local via _postgresql._tcp)
         self.mdns = MDNSBroadcaster(port=self.config["port"], log_fn=self._log)
-        self.minio = MinIOManager(self.config, log_fn=self._log)
+        self.rustfs = RustFSManager(self.config, log_fn=self._log)
         self.pgadmin = PgAdminManager(self.config, log_fn=self._log)
 
         # Phase 2 — mDNS server for .local LAN discovery
@@ -156,7 +156,7 @@ class MainWindow(QMainWindow):
             app_registry_fn=load_apps,
             process_manager=self.app_procs,
             postgres_manager=self.manager,
-            minio_manager=self.minio,
+            rustfs_manager=self.rustfs,
             caddy_manager=self.caddy,
             admin_config=self.config,
             log_fn=self._log,
@@ -182,10 +182,12 @@ class MainWindow(QMainWindow):
             self.scheduler.start()
 
         # Staggered Phase 2 startup
-        QTimer.singleShot(500, self._auto_start_mdns)
-        QTimer.singleShot(600, self._start_mdns_server)  # mDNS .local broadcast
-        QTimer.singleShot(700, self._start_landing_server)
-        QTimer.singleShot(800, self._start_api_server)
+        # Sequence: mDNS → landing → API → (PostgreSQL autostart) → RustFS → Caddy/apps
+        # Each stage is either time-staggered or gated on the previous service being healthy.
+        QTimer.singleShot(500,  self._auto_start_mdns)
+        QTimer.singleShot(600,  self._start_mdns_server)   # mDNS .local broadcast
+        QTimer.singleShot(700,  self._start_landing_server)
+        QTimer.singleShot(800,  self._start_api_server)
         QTimer.singleShot(2000, self._start_caddy_and_apps)
 
     # ── Phase 2 startup helpers ───────────────────────────────────────────────
@@ -196,9 +198,9 @@ class MainWindow(QMainWindow):
         self._log(msg)
 
         # Register the fixed infrastructure subdomains so LAN devices can
-        # resolve minio.pgops.local, console.pgops.local, pgadmin.pgops.local
+        # resolve storage.pgops.local, storage-console.pgops.local, pgadmin.pgops.local
         # in addition to app-specific subdomains.
-        for hostname in ("minio.pgops", "console.pgops", "pgadmin.pgops"):
+        for hostname in ("storage.pgops", "storage-console.pgops", "pgadmin.pgops"):
             self.mdns_server.register_app("", domain=f"{hostname}.local")
 
         # Register any already-deployed apps
@@ -219,19 +221,87 @@ class MainWindow(QMainWindow):
         self._log(msg)
 
     def _start_caddy_and_apps(self):
+        """
+        Dependency-ordered startup of the top-level services.
+
+        Order
+        -----
+        1. RustFS  — started (or confirmed healthy) before Caddy so the storage
+                     subdomain is live when Caddy begins proxying it.
+        2. pgAdmin — started in parallel with RustFS if PostgreSQL is running.
+        3. Caddy   — started after RustFS so all upstream services are up.
+        4. Apps    — resumed after Caddy is serving their subdomains.
+
+        Every stage is non-blocking (uses _run() workers) so the UI stays
+        responsive.  Caddy startup is deferred via QTimer until the RustFS
+        health gate has had a chance to complete (2-second buffer built into
+        the call chain).
+        """
         apps = load_apps()
+
+        # ── 1. RustFS ────────────────────────────────────────────────────────
+        if (
+            not self.rustfs.is_running()
+            and self.rustfs.is_binaries_available()
+        ):
+            self._log("[Orchestrator] Starting RustFS storage server...")
+
+            def _start_rustfs(_p):
+                return self.rustfs.start()
+
+            def _after_rustfs(ok, msg):
+                self._log(f"[RustFS] {msg}")
+                # Chain: once RustFS is healthy, bring up Caddy + apps
+                QTimer.singleShot(500, self._start_caddy_chain)
+
+            self._run(_start_rustfs, _after_rustfs)
+        else:
+            # RustFS already running (or binaries not present) — go straight to Caddy
+            QTimer.singleShot(200, self._start_caddy_chain)
+
+        # ── 2. pgAdmin (independent of RustFS, only needs PostgreSQL) ────────
+        if (
+            not self.pgadmin.is_running()
+            and self.pgadmin.is_available()
+            and self.manager.is_running()
+        ):
+            self._log("[Orchestrator] Starting pgAdmin...")
+
+            def _start_pga(_p):
+                return self.pgadmin.start(caddy_https_port=self.caddy.https_port)
+
+            def _after_pga(ok, msg):
+                self._log(f"[pgAdmin] {msg}")
+                self._update_pgadmin_status()
+
+            self._run(_start_pga, _after_pga)
+
+    def _start_caddy_chain(self):
+        """
+        Start Caddy then resume any apps that were running before shutdown.
+        Called after RustFS is confirmed healthy (or skipped if not installed).
+        """
+        apps = load_apps()
+
+        if self.caddy.is_available():
+            if not self.caddy.is_running():
+                self._log("[Orchestrator] Starting Caddy reverse proxy...")
+                ok, msg = self.caddy.start(
+                    apps, pgadmin_running=self.pgadmin.is_running()
+                )
+                self._log(msg)
+            else:
+                self._log("[Orchestrator] Caddy already running — reloading config.")
+                self.caddy.update_apps(apps)
+        else:
+            self._log("[Caddy] Binary not found — click Setup Caddy in the Server tab.")
+
+        # Resume apps (FrankenPHP processes)
         running_apps = [a for a in apps if a.get("status") == "running"]
         if running_apps:
             results = self.app_procs.start_all(running_apps)
             for app_id, ok, msg in results:
                 self._log(f"[App:{app_id}] {msg}")
-        if self.caddy.is_available():
-            # pgadmin_running flag kept for compat but no longer controls the
-            # pgadmin block — it is always written in generate_caddyfile()
-            ok, msg = self.caddy.start(apps, pgadmin_running=self.pgadmin.is_running())
-            self._log(msg)
-        else:
-            self._log("[Caddy] Binary not found — click Setup Caddy in the Server tab.")
 
     def _initial_load(self):
         self._poll()
@@ -275,7 +345,7 @@ class MainWindow(QMainWindow):
         self._srv_tab = ServerTab(
             manager=self.manager,
             config=self.config,
-            minio=self.minio,
+            rustfs=self.rustfs,
             pgadmin=self.pgadmin,
             on_start=self._start,
             on_stop=self._stop,
@@ -316,7 +386,7 @@ class MainWindow(QMainWindow):
         )
         self._add_page("apps", self._apps_tab)
 
-        self.files_tab = FilesTab(self.minio)
+        self.files_tab = FilesTab(self.rustfs)
         self._add_page("files", self.files_tab)
 
         self._backup_tab = BackupTab(
@@ -482,8 +552,8 @@ class MainWindow(QMainWindow):
         self.caddy.stop()
         self.api_server.stop()
         self.landing_srv.stop()
-        if self.minio.is_running():
-            self.minio.stop()
+        if self.rustfs.is_running():
+            self.rustfs.stop()
         if self.pgadmin.is_running():
             self.pgadmin.stop()
         if self.manager.is_running() and not service_exists():
@@ -510,48 +580,61 @@ class MainWindow(QMainWindow):
             self._load_databases_async()
             self._backup_tab.refresh_backup_list()
             self._ssl_tab.refresh_status()
-            if not self.minio.is_running() and self.minio.is_binaries_available():
-
-                def _sm(_p):
-                    return self.minio.start()
-
-                self._run(_sm, lambda ok, msg: self._log(f"[MinIO] {msg}"))
-            if not self.pgadmin.is_running() and self.pgadmin.is_available():
-
-                def _spa(_p):
-                    # Pass the Caddy HTTPS port so pgAdmin's config_local.py
-                    # gets the correct public URL for CSRF validation
-                    return self.pgadmin.start(caddy_https_port=self.caddy.https_port)
-
-                self._run(
-                    _spa,
-                    lambda ok, msg: (
-                        self._log(f"[pgAdmin] {msg}"),
-                        self._update_pgadmin_status(),
-                        # Reload Caddy so pgadmin subdomain is live
-                        (
-                            self.caddy.update_apps(load_apps())
-                            if self.caddy.is_running()
-                            else None
-                        ),
-                    ),
-                )
-            if not self.caddy.is_running():
-                QTimer.singleShot(500, self._start_caddy_and_apps)
+            # Delegate to the orchestrated startup chain — dependency order is
+            # handled inside _start_caddy_and_apps:
+            #   RustFS → (pgAdmin in parallel) → Caddy → apps
+            self._log("[Orchestrator] PostgreSQL is up — starting dependent services.")
+            QTimer.singleShot(300, self._start_caddy_and_apps)
 
     def _stop(self):
+        """
+        Dependency-ordered graceful shutdown.
+
+        Order (reverse of startup)
+        --------------------------
+        1. Stop all FrankenPHP app processes.
+        2. Stop Caddy (so no new requests come in).
+        3. Stop RustFS (storage server) — after Caddy, so in-flight uploads finish.
+        4. Stop pgAdmin.
+        5. Stop PostgreSQL last — all services that depend on it are already down.
+
+        Each step is synchronous within the worker thread so they happen in order
+        without race conditions.  The UI button is re-enabled only after the full
+        sequence completes.
+        """
         self._srv_tab.btn_stop.setEnabled(False)
-        if self.minio.is_running():
-            self.minio.stop()
-        if self.pgadmin.is_running():
-            self.pgadmin.stop()
+        self._log("[Orchestrator] Initiating graceful shutdown...")
 
         def fn(_p):
+            # 1. Apps
+            self._log("[Orchestrator] Stopping app processes...")
+            self.app_procs.stop_all()
+
+            # 2. Caddy
+            if self.caddy.is_running():
+                self._log("[Orchestrator] Stopping Caddy...")
+                self.caddy.stop()
+
+            # 3. RustFS — tell the watchdog not to restart during shutdown
+            if self.rustfs.is_running():
+                self._log("[Orchestrator] Stopping RustFS storage...")
+                self.rustfs.stop()   # sets _should_run=False internally
+
+            # 4. pgAdmin
+            if self.pgadmin.is_running():
+                self._log("[Orchestrator] Stopping pgAdmin...")
+                self.pgadmin.stop()
+
+            # 5. PostgreSQL
+            self._log("[Orchestrator] Stopping PostgreSQL...")
             return self.manager.stop(), ""
 
-        self._run(
-            fn, lambda ok, msg: (self._srv_tab.btn_stop.setEnabled(True), self._poll())
-        )
+        def _done(ok, msg):
+            self._srv_tab.btn_stop.setEnabled(True)
+            self._log("[Orchestrator] All services stopped.")
+            self._poll()
+
+        self._run(fn, _done)
 
     def _download(self):
         self._srv_tab.btn_setup.setEnabled(False)
@@ -805,7 +888,7 @@ class MainWindow(QMainWindow):
         self.config.update(new_cfg)
         save_config(self.config)
         self.manager.config = self.config
-        self.minio.config = self.config
+        self.rustfs.config = self.config
         self.pgadmin.pg_config = self.config
         self.caddy.config = self.config
         self.api_server._cfg = self.config
@@ -1017,6 +1100,9 @@ class MainWindow(QMainWindow):
         # Keep mDNS app registrations in sync
         if self.mdns_server.is_running():
             self.mdns_server.sync_apps(load_apps())
+
+        # RustFS watchdog — auto-restart if the process crashed unexpectedly
+        self.rustfs.watchdog_tick()
 
         # Refresh DNS tab periodically
         if hasattr(self, "_dns_tab"):
