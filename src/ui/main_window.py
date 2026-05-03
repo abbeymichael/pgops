@@ -280,28 +280,47 @@ class MainWindow(QMainWindow):
         """
         Start Caddy then resume any apps that were running before shutdown.
         Called after RustFS is confirmed healthy (or skipped if not installed).
+
+        Caddy startup is dispatched to a worker thread — caddy.start() has its
+        own health-poll loop that would block the Qt event loop if called inline.
+        App resumption follows only after Caddy is confirmed up.
         """
         apps = load_apps()
+        running_apps = [a for a in apps if a.get("status") == "running"]
 
         if self.caddy.is_available():
             if not self.caddy.is_running():
                 self._log("[Orchestrator] Starting Caddy reverse proxy...")
-                ok, msg = self.caddy.start(
-                    apps, pgadmin_running=self.pgadmin.is_running()
-                )
-                self._log(msg)
+
+                def fn(_p):
+                    ok, msg = self.caddy.start(
+                        apps, pgadmin_running=self.pgadmin.is_running()
+                    )
+                    # Resume apps inside the worker — they depend on Caddy being up.
+                    if ok and running_apps:
+                        results = self.app_procs.start_all(running_apps)
+                        for app_id, a_ok, a_msg in results:
+                            self._log(f"[App:{app_id}] {a_msg}")
+                    return ok, msg
+
+                self._run(fn, lambda ok, msg: self._log(msg))
+                return   # app resumption handled inside the worker above
+
             else:
                 self._log("[Orchestrator] Caddy already running — reloading config.")
                 self.caddy.update_apps(apps)
         else:
             self._log("[Caddy] Binary not found — click Setup Caddy in the Server tab.")
 
-        # Resume apps (FrankenPHP processes)
-        running_apps = [a for a in apps if a.get("status") == "running"]
+        # Caddy was already up (or not installed) — resume apps in a worker so
+        # start_all() doesn't block the main thread either.
         if running_apps:
-            results = self.app_procs.start_all(running_apps)
-            for app_id, ok, msg in results:
-                self._log(f"[App:{app_id}] {msg}")
+            def _resume(_p):
+                results = self.app_procs.start_all(running_apps)
+                for app_id, ok, msg in results:
+                    self._log(f"[App:{app_id}] {msg}")
+                return True, ""
+            self._run(_resume, lambda ok, msg: None)
 
     def _initial_load(self):
         self._poll()
@@ -1101,8 +1120,16 @@ class MainWindow(QMainWindow):
         if self.mdns_server.is_running():
             self.mdns_server.sync_apps(load_apps())
 
-        # RustFS watchdog — auto-restart if the process crashed unexpectedly
-        self.rustfs.watchdog_tick()
+        # RustFS watchdog — dispatch restart via _run() so start()'s 20-second
+        # health-poll loop never blocks the Qt event loop.
+        def _rustfs_restart_dispatch(start_fn):
+            self._run(
+                lambda _: start_fn(),
+                lambda ok, msg: self._log(
+                    f"[RustFS] {'Restarted OK' if ok else f'Auto-restart failed: {msg}'}"
+                ),
+            )
+        self.rustfs.watchdog_tick(dispatch_fn=_rustfs_restart_dispatch)
 
         # Refresh DNS tab periodically
         if hasattr(self, "_dns_tab"):

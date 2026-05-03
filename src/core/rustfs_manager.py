@@ -154,7 +154,16 @@ class RustFSManager:
         # The watchdog uses this to decide whether to auto-restart.
         self._should_run = False
         self._restart_count = 0
-        self._MAX_AUTO_RESTARTS = 5   # give up after N consecutive crashes
+        self._MAX_AUTO_RESTARTS = 5   # give up after N *consecutive* crashes
+        # Monotonic timestamp of the last moment RustFS was observed healthy.
+        # Used by the watchdog to distinguish a fresh crash from a crash loop.
+        self._last_healthy_time: float = 0.0
+        # How long (seconds) RustFS must have been stable before the watchdog
+        # treats a new crash as the start of a fresh restart sequence.
+        self._STABLE_UPTIME_S: float = 90.0
+        # Guards against two concurrent start() calls (e.g. watchdog firing
+        # while the initial startup worker thread is still in start()).
+        self._is_starting = False
 
     def log(self, msg: str):
         self._log(msg)
@@ -310,13 +319,26 @@ class RustFSManager:
         Start RustFS and block until the health endpoint returns 200.
 
         Lifecycle:
-          1. Guard: already running?
-          2. Guard: binary exists?
-          3. Spawn subprocess.
-          4. Poll health endpoint for up to _HEALTH_TIMEOUT_S seconds.
-          5. On success: set _should_run=True, reset restart counter, register mc alias.
-          6. On timeout: terminate the process and return failure.
+          1. Guard: already starting? (concurrent call protection)
+          2. Guard: already running?
+          3. Guard: binary exists?
+          4. Spawn subprocess.
+          5. Poll health endpoint for up to _HEALTH_TIMEOUT_S seconds.
+          6. On success: set _should_run=True, reset restart counter, register mc alias.
+          7. On timeout: terminate the process and return failure.
         """
+        # Prevent two simultaneous start() calls (e.g. watchdog + initial boot).
+        with self._lock:
+            if self._is_starting:
+                return False, "RustFS start already in progress — skipping."
+            self._is_starting = True
+        try:
+            return self._start_inner()
+        finally:
+            with self._lock:
+                self._is_starting = False
+
+    def _start_inner(self) -> tuple[bool, str]:
         if self.is_running():
             self.log("[RustFS] Already running.")
             self._should_run = True
@@ -330,9 +352,6 @@ class RustFSManager:
             **os.environ,
             "RUSTFS_ACCESS_KEY":  self.admin_user,
             "RUSTFS_SECRET_KEY":  self.admin_password,
-            # RustFS also honours MinIO-style env vars for full compatibility
-            "MINIO_ROOT_USER":     self.admin_user,
-            "MINIO_ROOT_PASSWORD": self.admin_password,
         }
 
         cmd = [
@@ -343,12 +362,19 @@ class RustFSManager:
             "--console-address", f"127.0.0.1:{self.console_port}",
         ]
 
-        self.log(f"[RustFS] Spawning process on port {self.api_port}…")
+        # Always reset the watchdog gave-up state on an explicit start() call so
+        # the operator never has to know about the internal retry limit.
+        self._restart_count = 0
+
+        # Redirect RustFS output to a log file so crashes leave a paper trail.
+        log_path = get_data_dir().parent / "rustfs.log"
+        self.log(f"[RustFS] Spawning process on port {self.api_port}… (log → {log_path})")
         try:
+            log_fh = open(log_path, "a", buffering=1)   # line-buffered
             kwargs = _popen_kwargs()
             kwargs["env"]    = env
-            kwargs["stdout"] = subprocess.DEVNULL
-            kwargs["stderr"] = subprocess.DEVNULL
+            kwargs["stdout"] = log_fh
+            kwargs["stderr"] = log_fh
             with self._lock:
                 self._proc = subprocess.Popen(cmd, **kwargs)
         except Exception as e:
@@ -371,8 +397,9 @@ class RustFSManager:
                 )
 
             if self.is_healthy():
-                self._should_run   = True
+                self._should_run    = True
                 self._restart_count = 0
+                self._last_healthy_time = time.monotonic()
                 self.log(f"[RustFS] Ready — API port {self.api_port}, console port {self.console_port}.")
                 self._configure_mc_alias()
                 return True, f"RustFS started on port {self.api_port}."
@@ -450,30 +477,57 @@ class RustFSManager:
 
     # ── Watchdog ───────────────────────────────────────────────────────────────
 
-    def watchdog_tick(self):
+    def watchdog_tick(self, dispatch_fn=None):
         """
         Called by the main window's 3-second poll timer.
 
         If the user has asked for RustFS to run (_should_run=True) but the
-        process is no longer healthy, attempt an automatic restart — up to
-        _MAX_AUTO_RESTARTS consecutive times.  After that limit the watchdog
-        gives up and logs a clear error so the operator knows to intervene.
+        process is no longer healthy, schedule an automatic restart — up to
+        _MAX_AUTO_RESTARTS *consecutive* times.
+
+        dispatch_fn — if provided, the restart is handed off to it rather than
+        called inline.  This keeps start()'s 20-second health-poll loop off the
+        Qt main thread.  Signature: dispatch_fn(callable) where callable is
+        self.start.  Pass None only in non-UI contexts (tests, CLI tools).
+
+        "Consecutive" is time-gated: if RustFS was last seen healthy more than
+        _STABLE_UPTIME_S seconds ago the crash counter resets, treating this as
+        a fresh incident rather than a tight crash loop.
         """
         if not self._should_run:
             return
 
         if self.is_running():
-            self._restart_count = 0   # healthy — reset the consecutive counter
+            self._restart_count     = 0
+            self._last_healthy_time = time.monotonic()
             return
 
+        # If start() is already running (e.g. initial boot worker still active),
+        # don't queue another restart — just wait for it to finish.
+        with self._lock:
+            if self._is_starting:
+                return
+
+        # Time-based reset: if RustFS was stable long enough before this crash,
+        # treat it as a new incident and reset the consecutive-restart counter.
+        if self._last_healthy_time > 0:
+            uptime_before_crash = time.monotonic() - self._last_healthy_time
+            if uptime_before_crash >= self._STABLE_UPTIME_S:
+                if self._restart_count > 0:
+                    self.log(
+                        f"[RustFS] Process ran for {uptime_before_crash:.0f}s before "
+                        "crashing — resetting restart counter."
+                    )
+                self._restart_count  = 0
+                self._last_healthy_time = 0.0
+
         if self._restart_count >= self._MAX_AUTO_RESTARTS:
-            # Already exhausted retries — log once per tick but don't spam
             if self._restart_count == self._MAX_AUTO_RESTARTS:
                 self.log(
-                    f"[RustFS] ⚠  Process has crashed {self._MAX_AUTO_RESTARTS} times. "
-                    "Automatic restart disabled. Please investigate and restart manually."
+                    f"[RustFS] ⚠  Process has crashed {self._MAX_AUTO_RESTARTS} times in "
+                    "a row. Automatic restart disabled. Check rustfs.log and restart manually."
                 )
-                self._restart_count += 1   # push past equality so we log only once
+                self._restart_count += 1
             return
 
         self._restart_count += 1
@@ -481,9 +535,14 @@ class RustFSManager:
             f"[RustFS] Process not healthy — auto-restart attempt "
             f"{self._restart_count}/{self._MAX_AUTO_RESTARTS}…"
         )
-        ok, msg = self.start()
-        if not ok:
-            self.log(f"[RustFS] Auto-restart failed: {msg}")
+
+        if dispatch_fn is not None:
+            # Hand off to caller's thread pool — never block the Qt event loop.
+            dispatch_fn(self.start)
+        else:
+            ok, msg = self.start()
+            if not ok:
+                self.log(f"[RustFS] Auto-restart failed: {msg}")
 
     # ── mc alias ──────────────────────────────────────────────────────────────
 

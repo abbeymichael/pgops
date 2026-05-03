@@ -81,23 +81,37 @@ def list_buckets() -> list[dict]:
 
 
 def get_bucket_size(bucket_name: str) -> str:
-    """Get total size of a bucket."""
-    ok, out = _mc(["du", "--json", f"{ALIAS}/{bucket_name}"])
-    if ok:
+    """
+    Get total size of a bucket by summing object sizes from the listing.
+
+    Uses 'mc ls --recursive --json' instead of 'mc du' because 'mc du'
+    internally issues GetObject requests for every object, which RustFS
+    rejects with AccessDenied when called with admin/root credentials.
+    'mc ls --recursive' uses only ListObjects, which returns object sizes
+    as metadata — no per-object reads needed.
+    """
+    ok, out = _mc(["ls", "--recursive", "--json", f"{ALIAS}/{bucket_name}"])
+    if not ok:
+        return "—"
+    total = 0
+    for line in out.splitlines():
+        line = line.strip()
+        if not line:
+            continue
         try:
-            data = json.loads(out.splitlines()[0])
-            size = data.get("size", 0)
-            if size < 1024:
-                return f"{size} B"
-            elif size < 1024 ** 2:
-                return f"{size/1024:.1f} KB"
-            elif size < 1024 ** 3:
-                return f"{size/1024**2:.1f} MB"
-            else:
-                return f"{size/1024**3:.2f} GB"
+            data = json.loads(line)
+            total += int(data.get("size", 0))
         except Exception:
-            pass
-    return "—"
+            continue
+    if total == 0:
+        return "0 B"
+    if total < 1024:
+        return f"{total} B"
+    if total < 1024 ** 2:
+        return f"{total/1024:.1f} KB"
+    if total < 1024 ** 3:
+        return f"{total/1024**2:.1f} MB"
+    return f"{total/1024**3:.2f} GB"
 
 
 def list_users() -> list[dict]:
