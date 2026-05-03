@@ -19,7 +19,6 @@ Lifecycle orchestration:
   - start()  → spawn process → wait-for-port loop → register mc alias.
   - stop()   → graceful mc admin service stop → terminate → force-kill fallback.
   - restart() → stop() then start() with full health gate.
-  - is_healthy() → HTTP GET /minio/health/live (RustFS honours this endpoint).
   - The manager never returns "started" until the health endpoint responds 200,
     so callers can depend on the service being genuinely ready.
   - watchdog_tick() is called periodically by MainWindow._poll(); it auto-restarts
@@ -37,32 +36,30 @@ import threading
 import requests
 from pathlib import Path
 
-
 # ── Download URLs ─────────────────────────────────────────────────────────────
 # RustFS releases mirror the MinIO binary layout.
 RUSTFS_DOWNLOAD = {
     "Windows": "https://dl.rustfs.com/server/rustfs/release/windows-amd64/rustfs.exe",
-    "Darwin":  "https://dl.rustfs.com/server/rustfs/release/darwin-amd64/rustfs",
+    "Darwin": "https://dl.rustfs.com/server/rustfs/release/darwin-amd64/rustfs",
 }
 
 # mc (MinIO Client) — fully compatible with RustFS S3 API
 MC_DOWNLOAD = {
     "Windows": "https://dl.min.io/client/mc/release/windows-amd64/mc.exe",
-    "Darwin":  "https://dl.min.io/client/mc/release/darwin-amd64/mc",
+    "Darwin": "https://dl.min.io/client/mc/release/darwin-amd64/mc",
 }
 
 # Bundled asset names (place in assets/ before building)
 RUSTFS_BUNDLED = {
     "Windows": "rustfs.exe",
-    "Darwin":  "rustfs",
+    "Darwin": "rustfs",
 }
 MC_BUNDLED = {
     "Windows": "mc.exe",
-    "Darwin":  "mc",
+    "Darwin": "mc",
 }
 
-# Health-check endpoint — RustFS exposes the same path as MinIO
-_HEALTH_PATH = "/minio/health/live"
+
 # How long to wait for the health endpoint before giving up
 _HEALTH_TIMEOUT_S = 20
 # Interval between health polls during startup
@@ -72,15 +69,18 @@ _HEALTH_POLL_INTERVAL = 0.5
 def _popen_kwargs() -> dict:
     if platform.system() == "Windows":
         import subprocess as sp
+
         return {"creationflags": sp.CREATE_NO_WINDOW}
     return {}
 
 
 # ── Path helpers ───────────────────────────────────────────────────────────────
 
+
 def get_rustfs_dir() -> Path:
     """Directory where rustfs and mc binaries live."""
     from core.pg_manager import get_app_data_dir
+
     d = get_app_data_dir() / "rustfs-bin"
     d.mkdir(parents=True, exist_ok=True)
     return d
@@ -89,13 +89,14 @@ def get_rustfs_dir() -> Path:
 def get_data_dir() -> Path:
     """Persistent object storage data directory."""
     from core.pg_manager import get_app_data_dir
+
     d = get_app_data_dir() / "rustfs-data"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
 
 def get_assets_dir() -> Path:
-    if getattr(sys, 'frozen', False):
+    if getattr(sys, "frozen", False):
         return Path(sys._MEIPASS) / "assets"
     return Path(__file__).parent.parent.parent / "assets"
 
@@ -124,6 +125,7 @@ def is_mc_available() -> bool:
 
 # ── RustFSManager ─────────────────────────────────────────────────────────────
 
+
 class RustFSManager:
     """
     Full lifecycle manager for the RustFS object storage server.
@@ -141,20 +143,22 @@ class RustFSManager:
                        for use in .env files and the UI.
     """
 
-    ALIAS        = "pgops"
-    API_PORT     = 9000
+    ALIAS = "pgops"
+    API_PORT = 9000
     CONSOLE_PORT = 9001
 
     def __init__(self, config: dict, log_fn=None):
-        self.config     = config
-        self._log       = log_fn or print
+        env = os.environ.copy()
+
+        self.config = config
+        self._log = log_fn or print
         self._proc: subprocess.Popen | None = None
-        self._lock      = threading.Lock()
+        self._lock = threading.Lock()
         # Tracks *intent*: True means "the user wants this running".
         # The watchdog uses this to decide whether to auto-restart.
         self._should_run = False
         self._restart_count = 0
-        self._MAX_AUTO_RESTARTS = 5   # give up after N *consecutive* crashes
+        self._MAX_AUTO_RESTARTS = 5  # give up after N *consecutive* crashes
         # Monotonic timestamp of the last moment RustFS was observed healthy.
         # Used by the watchdog to distinguish a fresh crash from a crash loop.
         self._last_healthy_time: float = 0.0
@@ -209,7 +213,9 @@ class RustFSManager:
             "rustfs",
             RUSTFS_BUNDLED.get(system, ""),
             RUSTFS_DOWNLOAD.get(system, ""),
-            progress_callback=lambda p: progress_callback(p // 2) if progress_callback else None,
+            progress_callback=lambda p: (
+                progress_callback(p // 2) if progress_callback else None
+            ),
         )
         if not ok1:
             return False, msg1
@@ -218,7 +224,9 @@ class RustFSManager:
             "mc",
             MC_BUNDLED.get(system, ""),
             MC_DOWNLOAD.get(system, ""),
-            progress_callback=lambda p: progress_callback(50 + p // 2) if progress_callback else None,
+            progress_callback=lambda p: (
+                progress_callback(50 + p // 2) if progress_callback else None
+            ),
         )
         if not ok2:
             return False, msg2
@@ -227,14 +235,15 @@ class RustFSManager:
             progress_callback(100)
         return True, "RustFS binaries ready."
 
-    def _setup_binary(self, name: str, bundled_name: str,
-                      url: str, progress_callback=None) -> tuple[bool, str]:
+    def _setup_binary(
+        self, name: str, bundled_name: str, url: str, progress_callback=None
+    ) -> tuple[bool, str]:
         dest = _bin(name)
         if dest.exists():
             self.log(f"{name} already available.")
             return True, f"{name} ready."
 
-        assets  = get_assets_dir()
+        assets = get_assets_dir()
         bundled = assets / bundled_name if bundled_name else None
         if bundled and bundled.exists():
             self.log(f"Extracting bundled {name}...")
@@ -251,7 +260,7 @@ class RustFSManager:
         try:
             resp = requests.get(url, stream=True, timeout=120)
             resp.raise_for_status()
-            total      = int(resp.headers.get("content-length", 0))
+            total = int(resp.headers.get("content-length", 0))
             downloaded = 0
             with open(dest, "wb") as f:
                 for chunk in resp.iter_content(chunk_size=65536):
@@ -280,37 +289,28 @@ class RustFSManager:
 
     def is_healthy(self) -> bool:
         """
-        True only when RustFS reports HTTP 200 on its health endpoint.
-        This is the canonical liveness check — use it instead of is_port_open()
-        wherever possible.
+        Check liveness via a plain TCP connection to the API port.
+        We do NOT use an HTTP GET because RustFS may interpret unknown URL paths
+        as GetObject requests, which it rejects with AccessDenied — and enough
+        of those rapid rejections crash the process.
         """
-        try:
-            r = requests.get(
-                f"http://127.0.0.1:{self.api_port}{_HEALTH_PATH}",
-                timeout=2,
-            )
-            return r.status_code == 200
-        except Exception:
-            return False
+        return self.is_port_open()
 
     def is_running(self) -> bool:
         """
         Combined check:
           1. If we hold a live Popen handle → verify the process is still alive.
-          2. Fall back to health endpoint (catches processes started outside PGOps).
+          2. Fall back to TCP port check (catches processes started outside PGOps).
         """
         with self._lock:
             proc = self._proc
         if proc is not None:
             if proc.poll() is None:
-                # Process is alive — confirm it's actually serving requests
                 return self.is_port_open()
             else:
-                # Process has exited — clear the stale handle
                 with self._lock:
                     self._proc = None
-        # No handle — check whether something is already listening on our port
-        return self.is_healthy()
+        return self.is_port_open()
 
     # ── Server lifecycle ───────────────────────────────────────────────────────
 
@@ -350,16 +350,18 @@ class RustFSManager:
         data_dir = get_data_dir()
         env = {
             **os.environ,
-            "RUSTFS_ACCESS_KEY":  self.admin_user,
-            "RUSTFS_SECRET_KEY":  self.admin_password,
+            "RUSTFS_ACCESS_KEY": self.admin_user,
+            "RUSTFS_SECRET_KEY": self.admin_password,
         }
 
         cmd = [
             str(rustfs_bin()),
             "server",
             str(data_dir),
-            "--address",         f"127.0.0.1:{self.api_port}",
-            "--console-address", f"127.0.0.1:{self.console_port}",
+            "--address",
+            f"127.0.0.1:{self.api_port}",
+            "--console-address",
+            f"127.0.0.1:{self.console_port}",
         ]
 
         # Always reset the watchdog gave-up state on an explicit start() call so
@@ -368,11 +370,13 @@ class RustFSManager:
 
         # Redirect RustFS output to a log file so crashes leave a paper trail.
         log_path = get_data_dir().parent / "rustfs.log"
-        self.log(f"[RustFS] Spawning process on port {self.api_port}… (log → {log_path})")
+        self.log(
+            f"[RustFS] Spawning process on port {self.api_port}… (log → {log_path})"
+        )
         try:
-            log_fh = open(log_path, "a", buffering=1)   # line-buffered
+            log_fh = open(log_path, "a", buffering=1)  # line-buffered
             kwargs = _popen_kwargs()
-            kwargs["env"]    = env
+            kwargs["env"] = env
             kwargs["stdout"] = log_fh
             kwargs["stderr"] = log_fh
             with self._lock:
@@ -397,10 +401,12 @@ class RustFSManager:
                 )
 
             if self.is_healthy():
-                self._should_run    = True
+                self._should_run = True
                 self._restart_count = 0
                 self._last_healthy_time = time.monotonic()
-                self.log(f"[RustFS] Ready — API port {self.api_port}, console port {self.console_port}.")
+                self.log(
+                    f"[RustFS] Ready — API port {self.api_port}, console port {self.console_port}."
+                )
                 self._configure_mc_alias()
                 return True, f"RustFS started on port {self.api_port}."
 
@@ -426,7 +432,9 @@ class RustFSManager:
             self.log("[RustFS] Requesting graceful shutdown via mc…")
             subprocess.run(
                 [str(mc_bin()), "admin", "service", "stop", self.ALIAS],
-                capture_output=True, timeout=10, **_popen_kwargs(),
+                capture_output=True,
+                timeout=10,
+                **_popen_kwargs(),
             )
             # Give it a moment to shut down cleanly
             for _ in range(10):
@@ -467,7 +475,8 @@ class RustFSManager:
             if platform.system() == "Windows":
                 subprocess.run(
                     ["taskkill", "/F", "/IM", "rustfs.exe"],
-                    capture_output=True, **_popen_kwargs(),
+                    capture_output=True,
+                    **_popen_kwargs(),
                 )
             else:
                 subprocess.run(
@@ -498,7 +507,7 @@ class RustFSManager:
             return
 
         if self.is_running():
-            self._restart_count     = 0
+            self._restart_count = 0
             self._last_healthy_time = time.monotonic()
             return
 
@@ -518,7 +527,7 @@ class RustFSManager:
                         f"[RustFS] Process ran for {uptime_before_crash:.0f}s before "
                         "crashing — resetting restart counter."
                     )
-                self._restart_count  = 0
+                self._restart_count = 0
                 self._last_healthy_time = 0.0
 
         if self._restart_count >= self._MAX_AUTO_RESTARTS:
@@ -547,19 +556,44 @@ class RustFSManager:
     # ── mc alias ──────────────────────────────────────────────────────────────
 
     def _configure_mc_alias(self):
-        """
-        Register the pgops alias in mc using the internal plaintext URL.
-        mc talks directly to RustFS on localhost — it does NOT go through Caddy.
-        """
-        if not is_mc_available():
-            return
-        self.log("[RustFS] Registering mc alias 'pgops'…")
-        subprocess.run([
-            str(mc_bin()), "alias", "set", self.ALIAS,
-            f"http://127.0.0.1:{self.api_port}",
-            self.admin_user,
-            self.admin_password,
-        ], capture_output=True, **_popen_kwargs())
+
+        import json
+
+        # Determine mc config path per platform
+        if platform.system() == "Windows":
+            base = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
+            config_path = base / "mc" / "config.json"
+        else:
+            config_path = Path.home() / ".config" / "mc" / "config.json"
+
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Load existing config if present, otherwise start fresh
+        config = {}
+        if config_path.exists():
+            try:
+                config = json.loads(config_path.read_text(encoding="utf-8"))
+            except Exception:
+                config = {}
+
+        if "version" not in config:
+            config["version"] = "10"
+        if "aliases" not in config:
+            config["aliases"] = {}
+
+        config["aliases"][self.ALIAS] = {
+            "url": f"http://127.0.0.1:{self.api_port}",
+            "accessKey": self.admin_user,
+            "secretKey": self.admin_password,
+            "api": "s3v4",
+            "path": "auto",
+        }
+
+        try:
+            config_path.write_text(json.dumps(config, indent=4), encoding="utf-8")
+            self.log(f"[RustFS] mc alias '{self.ALIAS}' written to {config_path}")
+        except Exception as exc:
+            self.log(f"[RustFS] Warning: could not write mc config: {exc}")
 
     def ensure_mc_alias(self):
         """Call this before any mc operations."""
@@ -609,9 +643,10 @@ class RustFSManager:
             return False, "mc binary not available."
         self.ensure_mc_alias()
         r = subprocess.run(
-            [str(mc_bin()), "anonymous", "set", "download",
-             f"{self.ALIAS}/{bucket}"],
-            capture_output=True, text=True, **_popen_kwargs(),
+            [str(mc_bin()), "anonymous", "set", "download", f"{self.ALIAS}/{bucket}"],
+            capture_output=True,
+            text=True,
+            **_popen_kwargs(),
         )
         if r.returncode == 0:
             return True, f"Bucket '{bucket}' is now public (read-only)."
@@ -623,9 +658,10 @@ class RustFSManager:
             return False, "mc binary not available."
         self.ensure_mc_alias()
         r = subprocess.run(
-            [str(mc_bin()), "anonymous", "set", "none",
-             f"{self.ALIAS}/{bucket}"],
-            capture_output=True, text=True, **_popen_kwargs(),
+            [str(mc_bin()), "anonymous", "set", "none", f"{self.ALIAS}/{bucket}"],
+            capture_output=True,
+            text=True,
+            **_popen_kwargs(),
         )
         if r.returncode == 0:
             return True, f"Bucket '{bucket}' is now private."
@@ -638,7 +674,9 @@ class RustFSManager:
         self.ensure_mc_alias()
         r = subprocess.run(
             [str(mc_bin()), "anonymous", "get", f"{self.ALIAS}/{bucket}"],
-            capture_output=True, text=True, **_popen_kwargs(),
+            capture_output=True,
+            text=True,
+            **_popen_kwargs(),
         )
         out = (r.stdout + r.stderr).lower()
         if "download" in out or "public" in out:
@@ -660,6 +698,7 @@ class RustFSManager:
             return False, "Folder name cannot be empty."
 
         import tempfile, os as _os
+
         with tempfile.NamedTemporaryFile(delete=False, suffix=".keep") as tf:
             tf.write(b"")
             tmp = tf.name
@@ -668,7 +707,9 @@ class RustFSManager:
         try:
             r = subprocess.run(
                 [str(mc_bin()), "cp", tmp, target],
-                capture_output=True, text=True, **_popen_kwargs(),
+                capture_output=True,
+                text=True,
+                **_popen_kwargs(),
             )
             _os.unlink(tmp)
             if r.returncode == 0:
@@ -692,7 +733,9 @@ class RustFSManager:
 
         r = subprocess.run(
             [str(mc_bin()), "ls", "--recursive=false", path],
-            capture_output=True, text=True, **_popen_kwargs(),
+            capture_output=True,
+            text=True,
+            **_popen_kwargs(),
         )
         folders = []
         for line in r.stdout.splitlines():
@@ -713,9 +756,16 @@ class RustFSManager:
             return False, "Folder name cannot be empty."
 
         r = subprocess.run(
-            [str(mc_bin()), "rm", "--recursive", "--force",
-             f"{self.ALIAS}/{bucket}/{folder}/"],
-            capture_output=True, text=True, **_popen_kwargs(),
+            [
+                str(mc_bin()),
+                "rm",
+                "--recursive",
+                "--force",
+                f"{self.ALIAS}/{bucket}/{folder}/",
+            ],
+            capture_output=True,
+            text=True,
+            **_popen_kwargs(),
         )
         if r.returncode == 0:
             return True, f"Folder '{folder}' deleted from '{bucket}'."
@@ -726,6 +776,7 @@ class RustFSManager:
     def get_lan_ip(self) -> str:
         try:
             from core.network_info import get_all_interfaces, get_best_ip
+
             ifaces = get_all_interfaces()
             return get_best_ip(ifaces, self.config.get("preferred_ip", ""))
         except Exception:

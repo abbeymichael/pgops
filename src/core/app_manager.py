@@ -25,7 +25,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
-
 # ── Directory helpers ─────────────────────────────────────────────────────────
 
 
@@ -155,40 +154,67 @@ def generate_password(length: int = 24) -> str:
 
 
 def write_laravel_env(app_folder: str, values: dict):
+    """
+    Write Laravel .env file.
+
+    Strategy:
+      1. Load existing .env if present (preserves all app-level keys the
+         developer set — MAIL_*, PUSHER_*, custom flags, etc.).
+         Falls back to .env.example if no .env exists yet.
+      2. Any key supplied in `values` (DB_*, AWS_*, APP_*) always overwrites
+         whatever was in the source file — no exceptions.
+      3. Keys in `values` that didn't exist in the source are appended at the end.
+    """
     env_path = os.path.join(app_folder, ".env")
     example_path = os.path.join(app_folder, ".env.example")
-
-    source_path = None
 
     if os.path.exists(env_path):
         source_path = env_path
     elif os.path.exists(example_path):
         source_path = example_path
+    else:
+        source_path = None
 
-    existing: dict[str, str] = {}
+    # Parse source into ordered list of (normalised_key_or_none, raw_line)
+    parsed: list[tuple] = []
 
-    # Load existing content if we have a source
     if source_path:
-        with open(source_path, encoding="utf-8") as f:
+        with open(source_path, encoding="utf-8", errors="replace") as f:
             for line in f:
                 stripped = line.strip()
-
-                # Preserve empty lines and comments
                 if not stripped or stripped.startswith("#"):
-                    existing[line] = line
-                elif "=" in line:
-                    key = line.partition("=")[0].strip()
-                    existing[key] = line
+                    # Blank line or comment — preserve as-is, no key
+                    parsed.append((None, line))
+                elif "=" in stripped:
+                    # Normalise key: strip ALL whitespace around it
+                    # Handles: DB_HOST=x  |  DB_HOST =x  |  DB_HOST= x
+                    key = stripped.split("=", 1)[0].strip()
+                    parsed.append((key, line))
                 else:
-                    existing[line] = line
+                    parsed.append((None, line))
 
-    # Override / insert values
-    for key, value in values.items():
-        existing[key] = f"{key}={value}\n"
+    # Build output: replace matching keys with our values, keep everything else
+    output_lines: list[str] = []
+    written_keys: set[str] = set()
 
-    # Write final .env
+    for key_or_none, raw_line in parsed:
+        if key_or_none is not None and key_or_none in values:
+            # Our provisioned value always wins
+            output_lines.append(f"{key_or_none}={values[key_or_none]}\n")
+            written_keys.add(key_or_none)
+        else:
+            # App-level key not managed by PGOps — keep exactly as-is
+            output_lines.append(raw_line)
+
+    # Append keys we manage that weren't in the source file at all
+    remaining = {k: v for k, v in values.items() if k not in written_keys}
+    if remaining:
+        output_lines.append("\n")
+        for key, value in remaining.items():
+            output_lines.append(f"{key}={value}\n")
+
     with open(env_path, "w", encoding="utf-8") as f:
-        f.writelines(existing.values())
+        f.writelines(output_lines)
 
 
 # ── Artisan runner ────────────────────────────────────────────────────────────
@@ -422,7 +448,7 @@ def provision_app(
     else:
         _step(label, "done")
 
-    is_laravel = (stack_type == "laravel")
+    is_laravel = stack_type == "laravel"
 
     # ── 2-7: Laravel-only steps (PHP ini, DB, bucket, .env, artisan) ──────────
     ini_path: Optional[Path] = None
@@ -512,7 +538,7 @@ def provision_app(
                     "DB_DATABASE": db_name,
                     "DB_USERNAME": db_user,
                     "DB_PASSWORD": db_password,
-                    #"DB_SSLMODE": "require",
+                    # "DB_SSLMODE": "require",
                     "FILESYSTEM_DISK": "s3",
                     "AWS_ACCESS_KEY_ID": access_key,
                     "AWS_SECRET_ACCESS_KEY": secret_key,
@@ -559,6 +585,7 @@ def provision_app(
             _step("Running artisan migrate", "done")
 
         from core.frankenphp_manager import LARAVEL_REQUIRED_EXTENSIONS
+
         exts_list = sorted(required_extensions or LARAVEL_REQUIRED_EXTENSIONS)
 
     # ── 8. Build registry entry ───────────────────────────────────────────────
@@ -612,7 +639,7 @@ def delete_app(
     _step("Stopping app process")
     _step("Stopping app process", "done")
 
-    is_laravel = (app.get("stack_type", "laravel") == "laravel")
+    is_laravel = app.get("stack_type", "laravel") == "laravel"
 
     if is_laravel and app.get("database"):
         _step(f"Dropping database '{app['database']}'")
